@@ -52,6 +52,7 @@ class CollisionKernel:
     def __init__(self, engine):
         self.engine = engine
         self.pipeline = engine.make_pipeline("collision")
+        self.fused_pipeline = engine.make_pipeline("collision_and_tally")
 
     def dispatch(self, particles, materials, fission_bank: FissionBank,
                  params, count: int, command_buffer):
@@ -60,5 +61,21 @@ class CollisionKernel:
             self.pipeline,
             [particles, materials, fission_bank.buffer,
              fission_bank.count_buffer, params],
+            count, command_buffer
+        )
+
+    def dispatch_fused(self, particles, materials, fission_bank: FissionBank,
+                       params, tally_flux, tally_fission,
+                       count: int, command_buffer):
+        """Encode fused collision + tally kernel.
+
+        Buffer bindings: [0]particles [1]materials [2]fissionBank
+        [3]fissionCount [4]params [5]tallyFlux [6]tallyFission
+        """
+        self.engine.dispatch(
+            self.fused_pipeline,
+            [particles, materials, fission_bank.buffer,
+             fission_bank.count_buffer, params,
+             tally_flux, tally_fission],
             count, command_buffer
         )

@@ -172,3 +172,25 @@ inline float philox_uniform(thread uint& counter_lo, uint counter_hi, uint key) 
     counter_lo++;
     return float(result.x) * 2.3283064365e-10f;  // 1.0 / 2^32
 }
+
+// =============================================================================
+// Atomic Float Addition Helper
+// =============================================================================
+// Uses a CAS loop to atomically add a float delta to a device atomic_uint
+// (float stored as uint bits). Correct even under high contention.
+// Shared by tally_score and collision_and_tally kernels.
+// =============================================================================
+
+inline void atomic_add_float(device atomic_uint* target, float delta) {
+    uint expected = atomic_load_explicit(target, memory_order_relaxed);
+    while (true) {
+        float  current = as_type<float>(expected);
+        float  newVal  = current + delta;
+        uint   desired = as_type<uint>(newVal);
+        if (atomic_compare_exchange_weak_explicit(
+                target, &expected, desired,
+                memory_order_relaxed, memory_order_relaxed)) {
+            break;
+        }
+    }
+}

@@ -190,29 +190,32 @@ class Simulation:
     def _transport_batch(self) -> int:
         """Run event-based transport loop until all particles dead.
 
-        Batches multiple transport steps per GPU sync to reduce CPU-GPU
-        round-trip overhead. Checks all_dead every `check_interval` steps.
+        Uses 3 fused GPU kernels per step (down from 5):
+          1. xs_lookup_and_distance (fused XS lookup + distance sampling)
+          2. move_particle (standalone - complex geometry logic)
+          3. collision_and_tally (fused collision + tally scoring)
+
+        Metal serial queues guarantee in-order execution, so we only
+        sync (waitUntilCompleted) when we need to read results on CPU.
+        Between syncs, command buffers are committed without waiting,
+        allowing the GPU to pipeline work continuously.
         """
         max_steps = 5000
-        check_interval = 10  # check all_dead every N steps
+        check_interval = 25  # check all_dead every N steps
+
+        last_cmd = None
 
         for step in range(max_steps):
             cmd = self.engine.command_queue.commandBuffer()
 
-            # 1. XS Lookup
-            self.kernels.dispatch_xs_lookup(
+            # 1. Fused XS Lookup + Distance to Collision
+            self.kernels.dispatch_xs_lookup_and_distance(
                 self.particle_buf.buffer, self.materials_buffer,
                 self.geometry.cell_buffer, self.params_buffer,
                 self.num_particles, cmd
             )
 
-            # 2. Distance to Collision
-            self.kernels.dispatch_distance_to_collision(
-                self.particle_buf.buffer, self.params_buffer,
-                self.num_particles, cmd
-            )
-
-            # 3. Move Particle
+            # 2. Move Particle (standalone - complex geometry)
             self.kernels.dispatch_move(
                 self.particle_buf.buffer,
                 self.geometry.surface_buffer,
@@ -222,28 +225,26 @@ class Simulation:
                 self.num_particles, cmd
             )
 
-            # 4. Collision
-            self.collision.dispatch(
+            # 3. Fused Collision + Tally
+            self.collision.dispatch_fused(
                 self.particle_buf.buffer, self.materials_buffer,
                 self.fission_bank, self.params_buffer,
-                self.num_particles, cmd
-            )
-
-            # 5. Tally Score
-            self.tally.dispatch(
-                self.particle_buf.buffer, self.params_buffer,
+                self.tally.flux_buffer, self.tally.fission_buffer,
                 self.num_particles, cmd
             )
 
             cmd.commit()
+            last_cmd = cmd
 
-            # Only sync and check periodically to reduce overhead
+            # Only sync and check periodically to reduce CPU-GPU overhead
             if (step + 1) % check_interval == 0:
                 cmd.waitUntilCompleted()
                 if self.particle_buf.all_dead():
                     return step + 1
-            else:
-                cmd.waitUntilCompleted()
+
+        # Final sync before returning to ensure all GPU work is complete
+        if last_cmd is not None:
+            last_cmd.waitUntilCompleted()
 
         return max_steps
 

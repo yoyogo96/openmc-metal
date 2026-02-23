@@ -21,22 +21,7 @@ using namespace metal;
 //   - Dead particles advance to EVENT_DEAD.
 // =============================================================================
 
-// Helper: atomic add on a float stored as uint bits.
-// Uses a CAS loop; correct even under high contention.
-inline void atomic_add_float(device atomic_uint* target, float delta) {
-    uint expected = atomic_load_explicit(target, memory_order_relaxed);
-    while (true) {
-        float  current = as_type<float>(expected);
-        float  newVal  = current + delta;
-        uint   desired = as_type<uint>(newVal);
-        if (atomic_compare_exchange_weak_explicit(
-                target, &expected, desired,
-                memory_order_relaxed, memory_order_relaxed)) {
-            break;
-        }
-        // expected was updated by the intrinsic on failure; retry.
-    }
-}
+// atomic_add_float is now defined in Common.metal (shared with fused kernels).
 
 // =============================================================================
 // tally_score kernel

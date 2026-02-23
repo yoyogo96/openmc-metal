@@ -226,9 +226,10 @@ def generate_report(results: dict, output_path: str):
     elements.append(Paragraph("5. Methodology", heading_style))
     elements.append(Paragraph(
         "<b>Algorithm:</b> Event-based Monte Carlo particle transport with k-eigenvalue "
-        "power iteration. Five GPU kernels per transport step: cross-section lookup, "
-        "distance-to-collision sampling, particle movement with boundary crossing, "
-        "collision physics (scatter/absorb/fission), and tally scoring.",
+        "power iteration. Three fused GPU kernels per transport step: cross-section lookup "
+        "with distance-to-collision sampling (fused), particle movement with boundary crossing, "
+        "and collision physics with tally scoring (fused). Asynchronous GPU dispatch eliminates "
+        "per-step CPU-GPU synchronization overhead.",
         body_style
     ))
     elements.append(Spacer(1, 0.1*inch))

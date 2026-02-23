@@ -73,6 +73,62 @@ kernel void xs_lookup(device Particle* particles       [[buffer(0)]],
 }
 
 // =============================================================================
+// Fused XS Lookup + Distance-to-Collision Kernel
+// =============================================================================
+// Combines xs_lookup and distance_to_collision into a single kernel dispatch.
+// Same thread does XS lookup then immediately samples collision distance.
+// No barrier needed (same-thread data dependency).
+// Eliminates one encoder + dispatch round-trip per transport step.
+// =============================================================================
+
+kernel void xs_lookup_and_distance(
+    device Particle* particles       [[buffer(0)]],
+    device const float* materials    [[buffer(1)]],
+    device const GPUCell* cells      [[buffer(2)]],
+    device const SimParams& params   [[buffer(3)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= params.numParticles) return;
+
+    device Particle& p = particles[tid];
+    if (p.alive == 0 || p.event != EVENT_XS_LOOKUP) return;
+
+    // --- Phase 1: XS Lookup (identical to xs_lookup) ---
+    uint cellIdx = p.cellIndex;
+    uint matIdx  = cells[cellIdx].materialIndex;
+    uint group   = p.energyGroup;
+
+    uint matOffset = matIdx * FLOATS_PER_MATERIAL;
+
+    p.xsTotal     = materials[matOffset + OFFSET_TOTAL + group];
+    p.xsFission   = materials[matOffset + OFFSET_FISSION + group];
+    p.xsNuFission = materials[matOffset + OFFSET_NU_FISSION + group];
+    p.materialIndex = matIdx;
+
+    float scatterTotal = 0.0f;
+    uint scatterRowStart = matOffset + OFFSET_SCATTER + group * params.numGroups;
+    for (uint g = 0; g < params.numGroups; g++) {
+        scatterTotal += materials[scatterRowStart + g];
+    }
+    p.xsScatter    = scatterTotal;
+    p.xsAbsorption = p.xsTotal - scatterTotal;
+
+    // --- Phase 2: Distance to Collision (identical to distance_to_collision) ---
+    if (p.xsTotal <= 0.0f) {
+        p.alive = 0;
+        p.event = EVENT_DEAD;
+        return;
+    }
+
+    uint rng_counter = p.rngCounter;
+    float xi = philox_uniform(rng_counter, tid, p.rngKey);
+    p.rngCounter = rng_counter;
+
+    p.distanceToCollision = -log(xi) / p.xsTotal;
+    p.event = EVENT_MOVE;
+}
+
+// =============================================================================
 // XSBench Microbenchmark Kernel
 // =============================================================================
 // Standalone cross-section lookup benchmark (not part of transport loop).

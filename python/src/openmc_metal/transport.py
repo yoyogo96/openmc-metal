@@ -11,6 +11,7 @@ class TransportKernels:
         self.xs_lookup_pipeline = engine.make_pipeline("xs_lookup")
         self.distance_pipeline = engine.make_pipeline("distance_to_collision")
         self.move_pipeline = engine.make_pipeline("move_particle")
+        self.xs_lookup_and_distance_pipeline = engine.make_pipeline("xs_lookup_and_distance")
 
     def dispatch_xs_lookup(self, particles, materials, cells, params,
                            count: int, command_buffer):
@@ -27,6 +28,15 @@ class TransportKernels:
         self.engine.dispatch(
             self.distance_pipeline,
             [particles, params],
+            count, command_buffer
+        )
+
+    def dispatch_xs_lookup_and_distance(self, particles, materials, cells, params,
+                                        count: int, command_buffer):
+        """Encode fused XS lookup + distance sampling: buffers [0]particles [1]materials [2]cells [3]params."""
+        self.engine.dispatch(
+            self.xs_lookup_and_distance_pipeline,
+            [particles, materials, cells, params],
             count, command_buffer
         )
 

@@ -172,3 +172,145 @@ kernel void collision(
     // Write back RNG counter to device memory
     p.rngCounter = rng_counter;
 }
+
+// =============================================================================
+// Fused Collision + Tally Kernel
+// =============================================================================
+// Combines collision and tally_score into a single kernel dispatch.
+// After collision logic (scatter/absorb/fission), immediately scores tallies.
+// No barrier needed (same-thread data dependency).
+// Eliminates one encoder + dispatch round-trip per transport step.
+//
+// Buffer bindings:
+//   0  particles
+//   1  materials     (flat MaterialXS array)
+//   2  fissionBank
+//   3  fissionCount  (atomic_uint)
+//   4  params
+//   5  tallyFlux     (atomic_uint, float bits)
+//   6  tallyFission  (atomic_uint, float bits)
+// =============================================================================
+
+kernel void collision_and_tally(
+    device Particle*        particles    [[buffer(0)]],
+    device const float*     materials    [[buffer(1)]],
+    device FissionSite*     fissionBank  [[buffer(2)]],
+    device atomic_uint*     fissionCount [[buffer(3)]],
+    device const SimParams& params       [[buffer(4)]],
+    device atomic_uint*     tallyFlux    [[buffer(5)]],
+    device atomic_uint*     tallyFission [[buffer(6)]],
+    uint tid [[thread_position_in_grid]]
+) {
+    if (tid >= params.numParticles) return;
+
+    device Particle& p = particles[tid];
+    if (p.alive == 0 || p.event != EVENT_COLLIDE) return;
+
+    uint matOffset = p.materialIndex * FLOATS_PER_MATERIAL;
+    uint g = p.energyGroup;
+
+    uint rng_counter = p.rngCounter;
+
+    // -------------------------------------------------------------------------
+    // Phase 1: Collision (identical to collision kernel)
+    // -------------------------------------------------------------------------
+    float xi = philox_uniform(rng_counter, tid, p.rngKey);
+
+    float absorptionProb = (p.xsTotal > 0.0f)
+                           ? (p.xsAbsorption / p.xsTotal)
+                           : 0.0f;
+
+    if (xi < absorptionProb) {
+        // ABSORPTION
+        if (p.xsFission > 0.0f) {
+            float fissionProb = (p.xsAbsorption > 0.0f)
+                                ? (p.xsFission / p.xsAbsorption)
+                                : 0.0f;
+            float xi2 = philox_uniform(rng_counter, tid, p.rngKey);
+            if (xi2 < fissionProb) {
+                float nu  = (p.xsFission > 0.0f)
+                            ? (p.xsNuFission / p.xsFission)
+                            : 0.0f;
+                float xi3 = philox_uniform(rng_counter, tid, p.rngKey);
+                uint numFission = (uint)(nu * p.weight + xi3);
+
+                for (uint f = 0; f < min(numFission, 3u); f++) {
+                    uint idx = atomic_fetch_add_explicit(
+                        fissionCount, 1u, memory_order_relaxed);
+
+                    if (idx < params.numParticles * 2u) {
+                        float xiChi   = philox_uniform(rng_counter, tid, p.rngKey);
+                        float cumChi  = 0.0f;
+                        uint  fGroup  = params.numGroups - 1u;
+
+                        for (uint gg = 0; gg < params.numGroups; gg++) {
+                            cumChi += materials[matOffset + OFFSET_CHI + gg];
+                            if (xiChi < cumChi) {
+                                fGroup = gg;
+                                break;
+                            }
+                        }
+
+                        fissionBank[idx].position    = p.position;
+                        fissionBank[idx]._pad        = 0.0f;
+                        fissionBank[idx].energyGroup = fGroup;
+                        fissionBank[idx]._pad2       = 0u;
+                        fissionBank[idx]._pad3       = 0u;
+                        fissionBank[idx]._pad4       = 0u;
+                    }
+                }
+            }
+        }
+
+        p.alive = 0u;
+    } else {
+        // SCATTER
+        float xiScatter  = philox_uniform(rng_counter, tid, p.rngKey);
+
+        float scatterRowSum = 0.0f;
+        for (uint gg = 0; gg < params.numGroups; gg++) {
+            scatterRowSum += materials[matOffset + OFFSET_SCATTER + g * params.numGroups + gg];
+        }
+
+        float threshold = xiScatter * ((scatterRowSum > 0.0f) ? scatterRowSum : 1.0f);
+        float cumS = 0.0f;
+        uint newGroup = g;
+        for (uint gg = 0; gg < params.numGroups; gg++) {
+            cumS += materials[matOffset + OFFSET_SCATTER + g * params.numGroups + gg];
+            if (cumS >= threshold) {
+                newGroup = gg;
+                break;
+            }
+        }
+        p.energyGroup = newGroup;
+
+        float mu      = 2.0f * philox_uniform(rng_counter, tid, p.rngKey) - 1.0f;
+        float phi     = 2.0f * M_PI_F * philox_uniform(rng_counter, tid, p.rngKey);
+        float sinTheta = sqrt(max(0.0f, 1.0f - mu * mu));
+
+        p.direction = normalize(float3(
+            sinTheta * cos(phi),
+            sinTheta * sin(phi),
+            mu
+        ));
+        p._pad1 = 0.0f;
+    }
+
+    p.rngCounter = rng_counter;
+
+    // -------------------------------------------------------------------------
+    // Phase 2: Tally (inline, identical to tally_score logic)
+    // -------------------------------------------------------------------------
+    if (p.distanceTraveled > 0.0f && p.cellIndex < params.numCells) {
+        uint idx = p.cellIndex * params.numGroups + p.energyGroup;
+
+        float fluxScore    = p.weight * p.distanceTraveled;
+        float fissionScore = p.weight * p.distanceTraveled * p.xsFission;
+
+        atomic_add_float(&tallyFlux[idx],    fluxScore);
+        atomic_add_float(&tallyFission[idx], fissionScore);
+    }
+
+    // Advance particle event state
+    p.event = (p.alive == 1u) ? EVENT_XS_LOOKUP : EVENT_DEAD;
+}
