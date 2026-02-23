@@ -19,12 +19,13 @@ def run_cpu_baseline_benchmark(c5g7_results: dict) -> dict:
     """
     from .cpu_baseline import run_cpu_baseline
 
-    # Use a modest particle count that completes in < 60 seconds
-    cpu_num_particles = 1000
-    cpu_num_batches   = 20
-    cpu_num_inactive  = 5
+    # Use 10K particles for a statistically fair baseline comparison.
+    # Larger counts would take too long but 10K gives reliable per-particle throughput.
+    cpu_num_particles = 10_000
+    cpu_num_batches   = 30
+    cpu_num_inactive  = 10
 
-    print(f"Running CPU baseline: {cpu_num_particles} particles x {cpu_num_batches} batches ...")
+    print(f"Running CPU baseline: {cpu_num_particles} particles x {cpu_num_batches} batches ({cpu_num_inactive} inactive) ...")
     cpu_result = run_cpu_baseline(
         num_particles=cpu_num_particles,
         num_batches=cpu_num_batches,

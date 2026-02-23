@@ -249,12 +249,9 @@ class Simulation:
         return max_steps
 
     def _resample_fission_bank(self, sites):
-        """Resample fission sites for next batch source."""
+        """Resample fission sites for next batch source via random sampling with replacement."""
+        import random
         if not sites:
             return source_sampler(self.num_particles, self.num_groups)
 
-        result = []
-        for i in range(self.num_particles):
-            idx = i % len(sites)
-            result.append(sites[idx])
-        return result
+        return random.choices(sites, k=self.num_particles)

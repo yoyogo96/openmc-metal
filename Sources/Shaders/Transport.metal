@@ -109,7 +109,7 @@ kernel void distance_to_collision(
     // Sample distance: d = -ln(xi) / sigma_t
     // philox_uniform requires a thread-local reference for counter_lo
     uint rng_counter = p.rngCounter;
-    float xi = philox_uniform(rng_counter, tid, p.rngKey);
+    float xi = max(philox_uniform(rng_counter, tid, p.rngKey), 1.0e-30f);
     p.rngCounter = rng_counter;
 
     p.distanceToCollision = -log(xi) / p.xsTotal;

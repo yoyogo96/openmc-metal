@@ -11,18 +11,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// ---------------------------------------------------------------------------
-// Material buffer layout constants
-// ---------------------------------------------------------------------------
-// The flat material buffer stores 77 floats per material:
-//   total[7] | scatter[7x7] | fission[7] | nuFission[7] | chi[7]
-
-constant uint FLOATS_PER_MATERIAL = 77;
-constant uint OFFSET_TOTAL      = 0;
-constant uint OFFSET_SCATTER    = 7;
-constant uint OFFSET_FISSION    = 56;
-constant uint OFFSET_NU_FISSION = 63;
-constant uint OFFSET_CHI        = 70;
+// Material buffer layout constants are defined in Common.metal.
 
 // =============================================================================
 // Cross-Section Lookup Kernel
@@ -121,7 +110,7 @@ kernel void xs_lookup_and_distance(
     }
 
     uint rng_counter = p.rngCounter;
-    float xi = philox_uniform(rng_counter, tid, p.rngKey);
+    float xi = max(philox_uniform(rng_counter, tid, p.rngKey), 1.0e-30f);
     p.rngCounter = rng_counter;
 
     p.distanceToCollision = -log(xi) / p.xsTotal;

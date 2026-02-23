@@ -24,13 +24,7 @@ using namespace metal;
 // This matches MaterialXS in Common.metal / Types.swift exactly.
 // =============================================================================
 
-// Material buffer layout constants — must match MaterialXS struct offsets.
-constant uint FLOATS_PER_MATERIAL = 77;  // 7 + 49 + 7 + 7 + 7
-constant uint OFFSET_TOTAL        = 0;
-constant uint OFFSET_SCATTER      = 7;   // after total[7]
-constant uint OFFSET_FISSION      = 56;  // after total[7] + scatter[49]
-constant uint OFFSET_NU_FISSION   = 63;  // after fission[7]
-constant uint OFFSET_CHI          = 70;  // after nuFission[7]
+// Material buffer layout constants are defined in Common.metal.
 
 // Fission site stored in the fission bank.
 // 32 bytes — 8 x 4-byte fields (padded for alignment).
@@ -302,7 +296,7 @@ kernel void collision_and_tally(
     // Phase 2: Tally (inline, identical to tally_score logic)
     // -------------------------------------------------------------------------
     if (p.distanceTraveled > 0.0f && p.cellIndex < params.numCells) {
-        uint idx = p.cellIndex * params.numGroups + p.energyGroup;
+        uint idx = p.cellIndex * params.numGroups + g;  // use pre-collision group
 
         float fluxScore    = p.weight * p.distanceTraveled;
         float fissionScore = p.weight * p.distanceTraveled * p.xsFission;

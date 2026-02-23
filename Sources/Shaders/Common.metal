@@ -137,6 +137,17 @@ struct SimParams {
     float kEff;
 };
 
+// MARK: - Material Buffer Layout Constants
+// The flat material buffer stores 77 floats per material:
+//   total[7] | scatter[7x7] | fission[7] | nuFission[7] | chi[7]
+
+constant uint FLOATS_PER_MATERIAL = 77;
+constant uint OFFSET_TOTAL      = 0;
+constant uint OFFSET_SCATTER    = 7;
+constant uint OFFSET_FISSION    = 56;
+constant uint OFFSET_NU_FISSION = 63;
+constant uint OFFSET_CHI        = 70;
+
 // =============================================================================
 // Philox-2x32-10 Counter-Based RNG
 // =============================================================================
