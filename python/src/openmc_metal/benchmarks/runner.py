@@ -65,6 +65,8 @@ def main():
                         help='Output PDF report path')
     parser.add_argument('--assembly', action='store_true',
                         help='Run 17x17 assembly benchmark instead of pincell')
+    parser.add_argument('--persistent', action='store_true',
+                        help='Run persistent kernel benchmarks (history-based)')
     parser.add_argument('--verbose', action='store_true',
                         help='Print every batch')
     args = parser.parse_args()
@@ -124,6 +126,42 @@ def main():
             num_inactive=args.inactive,
             verbose=args.verbose,
         )
+
+    # Persistent kernel benchmarks (history-based)
+    if args.persistent:
+        from ..persistent import PersistentSimulation
+
+        print("\n" + "=" * 60)
+        print("PHASE 2.8: Persistent Kernel Pincell")
+        print("=" * 60)
+        psim = PersistentSimulation(
+            num_particles=args.particles,
+            num_batches=args.batches,
+            num_inactive=args.inactive,
+        )
+        results['persistent_pincell'] = psim.run(
+            geometry_type='pincell', verbose=args.verbose,
+        )
+
+        print("\n" + "=" * 60)
+        print("PHASE 2.9: Persistent Kernel Assembly")
+        print("=" * 60)
+        psim_asm = PersistentSimulation(
+            num_particles=args.particles,
+            num_batches=args.batches,
+            num_inactive=args.inactive,
+        )
+        results['persistent_assembly'] = psim_asm.run(
+            geometry_type='assembly', verbose=args.verbose,
+        )
+
+        # Compute speedup vs event-based
+        eb_pps = results['c5g7'].get('particles_per_sec', 0.0)
+        pk_pin = results['persistent_pincell']['particles_per_sec']
+        pk_asm = results['persistent_assembly']['particles_per_sec']
+        print(f"\nPersistent kernel speedup:")
+        print(f"  Pincell:  {pk_pin:,.0f} p/s  ({pk_pin/eb_pps:.1f}x vs event-based)" if eb_pps > 0 else "")
+        print(f"  Assembly: {pk_asm:,.0f} p/s")
 
     # CPU Baseline (for GPU speedup comparison)
     print("\n" + "=" * 60)

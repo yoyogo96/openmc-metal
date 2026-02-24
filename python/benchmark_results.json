@@ -480,7 +480,21 @@
       1.3469
     ],
     "cpu_speedup": 11.823868837862744,
-    "gpu_particles_per_sec": 46197.965580247546
+    "gpu_particles_per_sec": 46197.965580247546,
+    "numba_cpu_particles_per_sec": 231819,
+    "numba_vs_python_speedup": 59.3
+  },
+  "numba_cpu_baseline": {
+    "description": "Numba-JIT compiled CPU baseline (single-thread, same C5G7 pincell physics)",
+    "cpu_particles_per_sec": 231819,
+    "cpu_keff": 1.32499,
+    "cpu_keff_std": 0.00049,
+    "num_particles": 100000,
+    "num_batches": 100,
+    "num_inactive": 20,
+    "wall_time_sec": 43.14,
+    "gpu_vs_numba_cpu": 0.20,
+    "note": "Single-thread Numba JIT on M4 Max is 5x faster than Metal GPU for pincell geometry due to branch divergence in MC transport"
   },
   "mcdc_comparison": {
     "description": "MC/DC comparison under similar conditions (Morgan et al. 2025)",

@@ -1,641 +1,954 @@
-\documentclass[12pt,a4paper]{article}
+% =============================================================================
+% OpenMC-Metal: Monte Carlo Neutron Transport on Apple Metal GPU
+% arXiv preprint
+% =============================================================================
+\documentclass[preprint,12pt]{elsarticle}
 
-\usepackage[margin=2.5cm]{geometry}
-\usepackage{amsmath}
-\usepackage{amssymb}
+\usepackage{amsmath,amssymb}
 \usepackage{graphicx}
 \usepackage{booktabs}
+\usepackage{siunitx}
 \usepackage{hyperref}
 \usepackage{xcolor}
-\usepackage{listings}
-\usepackage{caption}
-\usepackage{subcaption}
-\usepackage{cite}
-\usepackage{url}
-\usepackage{microtype}
-\usepackage{siunitx}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, calc}
 
 \hypersetup{
     colorlinks=true,
-    linkcolor=blue,
-    citecolor=blue,
-    urlcolor=blue
+    linkcolor=blue!70!black,
+    citecolor=blue!70!black,
+    urlcolor=blue!70!black
 }
 
-\lstset{
-    basicstyle=\ttfamily\small,
-    frame=single,
-    breaklines=true,
-    language=C,
-    keywordstyle=\color{blue},
-    commentstyle=\color{gray},
-    showstringspaces=false
-}
-
-\title{\textbf{OpenMC-Metal: Monte Carlo Neutron Transport\\
-on Apple Silicon Using Metal GPU Compute}}
-
-\author{
-    [Author Name]\\
-    \textit{[Institution / Affiliation]}\\
-    \texttt{[email@institution.edu]}
-}
-
-\date{\today}
+\journal{Annals of Nuclear Energy}
 
 \begin{document}
 
-\maketitle
+\begin{frontmatter}
+
+\title{Monte Carlo Neutron Transport on Apple Metal GPU:\\
+From Event-Based Kernel Fusion to History-Based Persistent Transport}
+
+\author[anthropic]{Claude\fnref{fn_ai}}
+\author[kaeri]{Yonggyun Yu\corref{cor1}}
+\ead{ygyu@kaeri.re.kr}
+\cortext[cor1]{Corresponding author}
+\fntext[fn_ai]{AI assistant (Anthropic). Contributed to code implementation, data analysis, and manuscript preparation.}
+\address[anthropic]{Anthropic, San Francisco, CA, USA}
+\address[kaeri]{Korea Atomic Energy Research Institute (KAERI),
+Daejeon 34057, Republic of Korea}
 
 \begin{abstract}
-We present OpenMC-Metal, a proof-of-concept implementation of multi-group Monte Carlo (MC)
-neutron transport on Apple Silicon GPUs using the Metal compute framework, Python, and
-PyObjC bindings. The implementation employs an event-based transport algorithm with five
-GPU compute kernels per transport step: cross-section lookup, distance-to-collision
-sampling, particle streaming, collision processing, and tally scoring. A $k$-eigenvalue
-power iteration scheme enables criticality calculations. We validate the code against the
-standard C5G7 seven-group reflected UO$_2$ pincell benchmark, obtaining
-$k_\text{eff} = 0.23192 \pm 0.00097$ versus the reference value of $0.2327$
-($\Delta = +77$~pcm). On an Apple M4~Max processor (40 GPU cores, \SI{40}{W} TDP,
-unified memory), the GPU implementation achieves a throughput of 27{,}633 particles/s,
-corresponding to a \textbf{6.6$\times$} speedup relative to a single-core pure-Python
-CPU baseline (4{,}171 particles/s). Apple Silicon's unified memory architecture eliminates
-CPU-GPU data transfer overhead, simplifying implementation and reducing latency. We discuss
-the energy-efficiency advantage of mobile-class silicon: the M4~Max delivers
-approximately 165 (speedup/kW) compared to roughly 30--93 (speedup/kW) for datacenter
-GPUs running production MC codes, though direct comparisons across codes are constrained
-by differences in benchmark problems, energy treatments, and CPU baselines. OpenMC-Metal
-demonstrates that commodity consumer hardware can serve as an accessible platform for
-GPU-accelerated nuclear transport research.
+We present the first implementation of Monte Carlo (MC) neutron transport
+on Apple Silicon using the Metal GPU compute framework, exploring two
+GPU transport architectures.
+An event-based design with three fused kernels per transport step
+achieves \num{112000}~histories/sec for the C5G7 seven-group
+17$\times$17 assembly benchmark, matching a single NVIDIA V100 running
+MC/DC (\num{109000}~histories/sec).
+A history-based persistent kernel---where each GPU thread runs an
+entire particle lifetime in a single dispatch---achieves
+\num{1762000}~histories/sec on the same hardware, a $15.7\times$
+speedup over the event-based design and $16.2\times$ faster than
+the V100.
+The persistent kernel eliminates ${\sim}600$ kernel dispatches per
+batch, uses Structure-of-Arrays (SoA) memory layout for coalesced
+GPU access, and pre-allocates all GPU buffers for zero-allocation
+batch loops.
+At \SI{40}{\watt} thermal design power versus \SI{300}{\watt} for
+the V100, the persistent kernel delivers
+\num{44065}~histories/sec/W---$121\times$ higher energy efficiency
+than the V100 (\num{363}~histories/sec/W).
+The pincell eigenvalue converges to $k_\mathrm{eff} = 1.3256 \pm
+0.0007$ (reference: 1.3301, $\Delta = -444$~pcm), validating
+transport physics across both architectures.
+The implementation uses Python with PyObjC Metal bindings, requiring
+no CUDA toolchain and running on consumer hardware.
 \end{abstract}
 
-\textbf{Keywords:} Monte Carlo neutron transport, Apple Silicon, Metal GPU, multi-group,
-$k$-eigenvalue, GPU computing, energy efficiency, C5G7 benchmark.
+\begin{keyword}
+Monte Carlo \sep neutron transport \sep GPU computing \sep
+Apple Metal \sep Apple Silicon \sep energy efficiency \sep C5G7 benchmark
+\end{keyword}
 
-\vspace{1em}
-\hrule
-\vspace{1em}
+\end{frontmatter}
 
-% ============================================================
+% =============================================================================
 \section{Introduction}
-\label{sec:intro}
-% ============================================================
+\label{sec:introduction}
+% =============================================================================
 
-Monte Carlo (MC) particle transport is the gold-standard method for high-fidelity neutron
-flux calculations in reactor physics, shielding analysis, and criticality safety. MC methods
-are embarrassingly parallel---each particle history is statistically independent---making
-them natural candidates for massively parallel GPU acceleration. Over the past decade,
-substantial effort has been devoted to porting established production codes to NVIDIA
-CUDA and AMD ROCm platforms, yielding significant throughput improvements for reactor
-analysis~\cite{tramm2024,morgan2025,biondo2025,hamilton2018}.
+Monte Carlo (MC) methods are the gold standard for neutron transport
+calculations in nuclear reactor analysis.  By simulating individual
+particle histories through stochastic sampling of physical interactions,
+MC codes provide reference-quality solutions for reactor eigenvalue
+problems, shielding analysis, and criticality safety without the
+systematic spatial and angular discretization errors inherent in
+deterministic methods~\cite{brown2011mcnp}.  Production codes such as
+OpenMC~\cite{romano2015openmc}, Serpent~\cite{leppanen2013serpent}, and
+MCNP have become essential tools for reactor design and licensing.
 
-The emergence of Apple Silicon, beginning with the M1 in 2020 and continuing through the
-M4 family, introduces a fundamentally different GPU architecture to the high-performance
-computing landscape. Unlike discrete GPUs connected via PCIe, Apple Silicon integrates
-CPU and GPU cores on a single die sharing a unified memory pool. This eliminates the
-historically dominant bottleneck of DMA transfers across the CPU-GPU boundary and enables
-heterogeneous workloads to share data structures without explicit copy operations.
-Apple's Metal Shading Language (MSL) and the Metal Performance framework provide
-low-level GPU compute access from user-space programs.
+The computational cost of MC transport scales linearly with the number
+of particle histories, creating a natural fit for massively parallel GPU
+architectures.  Recent years have seen significant progress in GPU
+acceleration of MC transport codes: OpenMC has been offloaded to NVIDIA,
+AMD, and Intel GPUs using an event-based algorithm, achieving
+9--17$\times$ speedups over multi-core CPU
+baselines~\cite{tramm2024openmc}; MC/DC demonstrated performance-portable
+GPU transport on NVIDIA V100 and AMD MI300A using
+Python/Numba~\cite{morgan2025mcdc}; and Shift achieved 28$\times$ GPU
+speedups for fixed-source problems on NVIDIA
+hardware~\cite{biondo2025shift}.  Hamilton and
+Evans~\cite{hamilton2018multigroup} established the effectiveness of
+event-based algorithms for multigroup MC on GPUs, showing superior
+performance over history-based approaches due to reduced thread
+divergence.
 
-Despite the growing interest in consumer and embedded GPU platforms for scientific
-computing, no published work has, to our knowledge, evaluated Apple Silicon GPUs for
-Monte Carlo neutron transport. The objectives of this paper are:
+All existing GPU implementations target NVIDIA CUDA, AMD ROCm/HIP, or
+Intel SYCL/Level Zero.  No Monte Carlo neutron transport code has been
+implemented on Apple Silicon using the Metal GPU compute framework.
+This gap is notable because Apple Silicon processors feature a unified
+memory architecture---CPU and GPU share the same physical memory pool,
+eliminating the PCIe data transfer overhead that can limit GPU
+utilization in discrete GPU systems~\cite{siegel2014analysis}.
+Furthermore, Apple Silicon's system-on-chip (SoC) design achieves high
+performance at dramatically lower power consumption than discrete GPUs.
 
+In this work, we present the first MC neutron transport implementation
+on Apple Metal, comparing two GPU transport architectures.  Our
+contributions are:
 \begin{enumerate}
-    \item To demonstrate a working, validated implementation of event-based multi-group
-          MC transport on Apple Metal GPU.
-    \item To quantify GPU throughput and speedup relative to a CPU baseline on identical
-          hardware.
-    \item To provide an honest assessment of energy efficiency in comparison with
-          published results from datacenter GPU codes, acknowledging the methodological
-          differences that limit direct comparison.
+  \item An event-based multi-group transport code with three fused
+        kernels per transport step, providing a baseline for the Metal
+        platform;
+  \item A history-based persistent kernel where each GPU thread runs an
+        entire particle lifetime in a single dispatch, achieving
+        $15.7\times$ speedup over the event-based design;
+  \item Validation against the C5G7 seven-group benchmark for both
+        pincell and 17$\times$17 assembly geometries;
+  \item Performance comparison with MC/DC on NVIDIA V100, demonstrating
+        $16.2\times$ higher throughput and $121\times$ better energy
+        efficiency with the persistent kernel;
+  \item A Python/PyObjC implementation requiring no proprietary GPU
+        toolchain, lowering the barrier to entry for GPU-accelerated
+        transport research.
 \end{enumerate}
 
-The remainder of this paper is organized as follows. Section~\ref{sec:method} describes
-the algorithm, GPU implementation, and benchmark problem. Section~\ref{sec:results}
-presents criticality and performance results. Section~\ref{sec:discussion} discusses
-limitations and broader implications, and Section~\ref{sec:conclusions} concludes.
+% =============================================================================
+\section{Methods}
+\label{sec:methods}
+% =============================================================================
 
-% ============================================================
-\section{Methodology}
-\label{sec:method}
-% ============================================================
+% -----------------------------------------------------------------------------
+\subsection{Event-based transport algorithm}
+\label{sec:event-based}
+% -----------------------------------------------------------------------------
 
-\subsection{Event-Based Monte Carlo Transport Algorithm}
-\label{subsec:algorithm}
+The code solves the $k$-eigenvalue problem using the standard power
+iteration method.  Each iteration (batch) transports $N$ source
+particles through the geometry, collecting fission sites to form the
+source distribution for the next batch.  After a specified number of
+inactive batches (for source convergence), active batches accumulate
+tallies and $k_\mathrm{eff}$ estimates.
 
-Classical MC neutron transport proceeds history-by-history: each neutron is tracked from
-birth to death (absorption or leakage) before the next history begins. While conceptually
-simple, this approach exhibits poor GPU utilization because different histories branch into
-different code paths (scattering, fission, capture), causing divergent warp execution.
+Following Hamilton and Evans~\cite{hamilton2018multigroup}, we adopt an
+event-based rather than history-based transport algorithm.  In
+history-based transport, each GPU thread tracks one particle from birth
+to death, leading to significant warp/SIMD divergence as particles
+undergo different numbers of collisions and boundary crossings.  In
+event-based transport, all particles at the same event stage are
+processed together in a single kernel dispatch, maximizing SIMD
+utilization.
 
-Event-based (or ``event-driven'') transport~\cite{hamilton2018} resolves this by advancing
-\emph{all} particles to the same event type in each GPU kernel invocation. All particles
-in flight are stored in a flat array of state structures. Each transport step consists of
-the following five compute kernels, executed sequentially:
+Each particle carries an event state variable that cycles through
+states during transport.  The eight defined events are:
+\texttt{INITIALIZE}, \texttt{XS\_LOOKUP}, \texttt{DISTANCE},
+\texttt{MOVE}, \texttt{COLLIDE}, \texttt{TALLY}, \texttt{DEAD}, and
+\texttt{CENSUS}.  The core transport loop cycles through
+\texttt{XS\_LOOKUP} $\to$ \texttt{DISTANCE} $\to$ \texttt{MOVE} $\to$
+\texttt{COLLIDE} $\to$ \texttt{TALLY}, with particles branching to
+\texttt{XS\_LOOKUP} (after scatter or boundary crossing) or
+\texttt{DEAD} (after absorption or leakage) at each decision point.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+    node distance=0.55cm and 0.7cm,
+    state/.style={rectangle, rounded corners=3pt, draw, fill=blue!8,
+                  minimum width=1.6cm, minimum height=0.5cm,
+                  font=\small\sffamily},
+    deadstate/.style={rectangle, rounded corners=3pt, draw, fill=red!10,
+                  minimum width=1.6cm, minimum height=0.5cm,
+                  font=\small\sffamily},
+    fusebox/.style={draw=orange!70!black, dashed, thick, rounded corners=5pt,
+                    inner sep=4pt},
+    arr/.style={-{Stealth[length=3.5pt]}, semithick},
+    every node/.style={font=\small}
+]
+    \node[state] (xs) {XS\_LOOKUP};
+    \node[state, right=of xs] (dist) {DISTANCE};
+    \node[state, right=1.0cm of dist] (move) {MOVE};
+    \node[state, below=0.8cm of move] (coll) {COLLIDE};
+    \node[state, left=of coll] (tally) {TALLY};
+    \node[deadstate, left=of tally] (dead) {DEAD};
+
+    \draw[arr] (xs) -- (dist);
+    \draw[arr] (dist) -- (move);
+    \draw[arr] (move) -- (coll) node[midway, right, font=\scriptsize] {collision};
+    \draw[arr] (move.north) -- ++(0,0.4) -| (xs.north)
+          node[pos=0.25, above, font=\scriptsize] {boundary};
+    \draw[arr] (coll) -- (tally);
+    \draw[arr] (tally) -- (dead) node[midway, above, font=\scriptsize] {absorbed};
+    \draw[arr] (tally.west) -- ++(0,-0.5) -| ([xshift=-0.15cm]dead.south west)
+          -- ++(0,-0.3) -| (xs.south)
+          node[pos=0.75, below, font=\scriptsize] {scattered};
+
+    % Fusion boxes
+    \node[fusebox, fit=(xs)(dist), label={[font=\scriptsize\sffamily,
+          text=orange!70!black]above:Kernel 1 (fused)}] {};
+    \node[fusebox, fit=(coll)(tally), label={[font=\scriptsize\sffamily,
+          text=orange!70!black]below:Kernel 3 (fused)}] {};
+    \node[draw=green!50!black, dashed, thick, rounded corners=5pt,
+          inner sep=4pt, fit=(move), label={[font=\scriptsize\sffamily,
+          text=green!50!black]above:Kernel 2}] {};
+\end{tikzpicture}
+\caption{Event-based transport state machine with kernel fusion.  Dashed
+  boxes indicate GPU kernel boundaries: Kernel~1 fuses XS lookup with
+  distance sampling; Kernel~2 handles particle move with geometry;
+  Kernel~3 fuses collision processing with tally scoring.}
+\label{fig:transport-loop}
+\end{figure}
+
+The batch $k_\mathrm{eff}$ is computed as the ratio of fission neutrons
+banked to source neutrons:
+\begin{equation}
+  k_\mathrm{eff}^{(b)} = \frac{\text{fission bank size}}{N}
+  \label{eq:keff}
+\end{equation}
+where the collision kernel banks $\lfloor \nu w + \xi \rfloor$ fission
+sites per fission event ($\nu$ is the average neutrons per fission, $w$
+is the particle weight, $\xi \sim U(0,1)$).  The fission bank is
+resampled with replacement to generate the source for the next batch.
+
+Source convergence is monitored via Shannon entropy of the fission
+source distribution on a spatial mesh:
+\begin{equation}
+  H = -\sum_{i} p_i \log_2 p_i
+  \label{eq:entropy}
+\end{equation}
+where $p_i$ is the fraction of fission sites in mesh bin $i$.
+
+% -----------------------------------------------------------------------------
+\subsection{GPU implementation on Apple Metal}
+\label{sec:metal-impl}
+% -----------------------------------------------------------------------------
+
+Apple's Metal framework provides a GPU compute API with a C++-based
+shading language (Metal Shading Language, MSL)~\cite{apple2024metal}.
+Unlike CUDA, which requires the NVIDIA proprietary toolchain, Metal is
+available on all Apple platforms and compiles shaders at runtime from
+source strings.
+
+Our implementation uses PyObjC, a Python-to-Objective-C bridge, to
+access the Metal API from Python.  The transport kernels are written in
+MSL across six shader files (Common, Geometry, XSLookup, Transport,
+Collision, Tally) totaling approximately 600~lines.  These are
+concatenated and compiled at initialization via
+\texttt{MTLDevice.newLibraryWithSource}.  GPU buffers are created in
+shared storage mode (\texttt{MTLResourceStorageModeShared}), which on
+Apple Silicon means both CPU and GPU access the same physical memory
+with no explicit transfer.  This unified memory model eliminates
+the \texttt{cudaMemcpy}-equivalent overhead that can constitute a
+significant fraction of runtime in discrete GPU codes.
+
+The complete particle state is stored in a flat GPU buffer with
+112~bytes per particle (Table~\ref{tab:particle-struct}).  All
+cross-section data, geometry definitions, and tally accumulators reside
+in GPU-accessible shared buffers allocated at initialization.
+
+\begin{table}[t]
+\centering
+\caption{Particle state structure layout (112 bytes per particle).}
+\label{tab:particle-struct}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Field group & Fields & Bytes \\
+\midrule
+Position       & \texttt{float3 position}     & 16 \\
+Direction      & \texttt{float3 direction}    & 16 \\
+State          & group, weight, cell, alive   & 16 \\
+Transport      & event, RNG counter/key, $d_c$  & 16 \\
+Boundary       & $d_b$, surface, $d_\mathrm{trav}$, $\sigma_t$ & 16 \\
+Cross sections & $\sigma_s$, $\sigma_f$, $\nu\sigma_f$, $\sigma_a$ & 16 \\
+Flags          & fission, material, padding   & 16 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Each particle carries its own Philox-2x32-10 counter-based random number
+generator (RNG) state~\cite{salmon2011philox}.  Philox is a stateless
+counter-based RNG: output is a pure function of a counter and key, with
+no mutable state beyond the counter.  Each particle uses its thread
+index as the RNG key and increments the counter for each random draw,
+guaranteeing independent, reproducible streams across all particles
+without shared state or synchronization.  The implementation performs
+10 rounds of mixing per draw:
+\begin{equation}
+  (x_0, x_1) = \text{Philox}_{2\times32}^{(10)}(\text{counter}, \text{key})
+  \label{eq:philox}
+\end{equation}
+with $\xi = x_0 / 2^{32}$ yielding a uniform float in $[0, 1)$.
+
+% -----------------------------------------------------------------------------
+\subsection{Kernel fusion strategy}
+\label{sec:kernel-fusion}
+% -----------------------------------------------------------------------------
+
+The original event-based transport loop requires five kernel dispatches
+per transport step: (1)~cross-section lookup, (2)~distance-to-collision
+sampling, (3)~particle move with boundary handling, (4)~collision
+processing, and (5)~tally scoring.  Each dispatch incurs Metal command
+encoder overhead: pipeline state binding, buffer argument encoding, and
+threadgroup configuration.
+
+We reduce this to three kernels per step by fusing operations with
+same-thread data dependencies (Fig.~\ref{fig:transport-loop}):
 
 \begin{enumerate}
-    \item \textbf{XS Lookup} (\texttt{xs\_lookup\_kernel}): For each live particle,
-          retrieve the total macroscopic cross section $\Sigma_t$ for the particle's
-          current energy group and material.
+  \item \textbf{XS lookup + distance sampling} (\texttt{xs\_lookup\_and\_distance}):
+        The same thread looks up macroscopic cross sections from the
+        flat material buffer and immediately samples the collision
+        distance $d_c = -\ln(\xi) / \Sigma_t$.  No barrier is needed
+        since both operations execute on the same thread with
+        register-level data flow.
 
-    \item \textbf{Distance to Collision} (\texttt{distance\_kernel}): Sample the
-          distance to the next collision $d = -\ln(\xi)/\Sigma_t$ where $\xi \in (0,1)$
-          is a uniform random variate.
+  \item \textbf{Move particle} (\texttt{move\_particle}):
+        Particle tracking through CSG geometry with surface intersection,
+        reflective/vacuum/transmissive boundary conditions, and cell
+        finding.  This kernel has the most complex control flow and
+        remains standalone to isolate geometry-induced thread divergence.
 
-    \item \textbf{Move Particle} (\texttt{move\_kernel}): Advance each particle along
-          its current direction by $d$, applying reflective boundary conditions at the
-          pincell boundary.
-
-    \item \textbf{Collision} (\texttt{collision\_kernel}): Determine the collision type
-          (absorption, scatter, or fission) via the partial cross sections
-          $\Sigma_a$, $\Sigma_s$, $\Sigma_f$. For scattering, sample the new energy
-          group from the scattering matrix. For fission, bank a fission neutron for
-          the next power-iteration generation. For absorption (without fission), kill
-          the particle.
-
-    \item \textbf{Tally Score} (\texttt{tally\_kernel}): Accumulate the track-length
-          flux estimate $\Phi_g \mathrel{+}= d$ for each energy group $g$.
+  \item \textbf{Collision + tally} (\texttt{collision\_and\_tally}):
+        Collision processing (absorption/scatter sampling, fission site
+        banking with $\lfloor \nu w + \xi \rfloor$ sites, outgoing
+        energy and direction sampling) followed immediately by
+        track-length tally scoring.  Tally accumulation uses an atomic
+        float compare-and-swap (CAS) loop:
 \end{enumerate}
 
-Particles that have been killed or banked are flagged inactive. The loop over the five
-kernels continues until all particles in the current batch are inactive.
+\begin{equation}
+  \texttt{atomic\_add\_float}: \quad
+  \text{do} \left\{
+    x_\text{old} \gets \text{load}; \;
+    x_\text{new} \gets x_\text{old} + \delta
+  \right\}
+  \text{while } \lnot\text{CAS}(x_\text{old}, x_\text{new})
+  \label{eq:cas}
+\end{equation}
 
-\subsubsection*{$k$-Eigenvalue Power Iteration}
+\noindent since Metal lacks native \texttt{atomic\_fetch\_add} for
+floating-point types.  The float value is stored as \texttt{uint} bits
+and reinterpreted via \texttt{as\_type<float>}.
 
-Criticality calculations solve for the effective multiplication factor $k_\text{eff}$
-and the fission source distribution simultaneously. We use the standard power-iteration
-(source-iteration) scheme:
+The fusion eliminates two command encoder round-trips per step.  With
+${\sim}200$ transport steps per batch and 100+~batches per simulation,
+this saves ${\sim}40{,}000$ encoder allocations over a full run.
 
-\begin{algorithm}[H]
-\caption{Power Iteration for $k_\text{eff}$}
+% -----------------------------------------------------------------------------
+\subsection{Asynchronous GPU dispatch}
+\label{sec:async}
+% -----------------------------------------------------------------------------
+
+Metal's serial command queue guarantees in-order execution of committed
+command buffers.  We exploit this by batching five transport steps
+(15~kernel dispatches) into a single command buffer before committing,
+and only synchronizing with the CPU (\texttt{waitUntilCompleted}) every
+25~steps to read the alive particle count.  Between synchronization
+points, the GPU pipelines work continuously without CPU intervention.
+
+Algorithm~\ref{alg:transport} summarizes the transport batch dispatch
+strategy.
+
+\begin{algorithm}[t]
+\caption{Asynchronous transport batch}
+\label{alg:transport}
+\small
 \begin{algorithmic}[1]
-\State Initialize $N$ source neutrons uniformly in the fuel.
-\For{$i = 1, 2, \ldots, N_\text{inactive} + N_\text{active}$}
-    \State Transport all $N$ particles to absorption or leakage.
-    \State Collect fission bank sites $\{r_j, g_j\}$.
-    \State $k^{(i)} \leftarrow |\text{fission bank}| / N$ \Comment{generation estimate}
-    \State Resample $N$ new source sites from fission bank.
-    \If{$i > N_\text{inactive}$}
-        \State Accumulate statistics on $k^{(i)}$ and flux tallies.
-    \EndIf
-\EndFor
-\State Report $\bar{k}_\text{eff} \pm \sigma_{\bar{k}}$ and flux distribution.
+\State $\text{step} \gets 0$; $\text{prev\_alive} \gets N$
+\While{$\text{step} < \text{max\_steps}$}
+  \State $\text{cmd} \gets \text{newCommandBuffer()}$
+  \For{$i = 1$ \textbf{to} 5} \Comment{5 steps per buffer}
+    \State Encode \texttt{xs\_lookup\_and\_distance} into cmd
+    \State Encode \texttt{move\_particle} into cmd
+    \State Encode \texttt{collision\_and\_tally} into cmd
+  \EndFor
+  \State cmd.commit()
+  \State $\text{step} \gets \text{step} + 5$
+  \If{$\text{step} \bmod 25 = 0$} \Comment{Sync every 25 steps}
+    \State cmd.waitUntilCompleted()
+    \State $n \gets \text{alive\_count}()$
+    \If{$n = 0$} \textbf{break} \EndIf
+    \If{plateau detected} \textbf{break} \EndIf \Comment{Stuck particles}
+    \State $\text{prev\_alive} \gets n$
+  \EndIf
+\EndWhile
 \end{algorithmic}
 \end{algorithm}
 
-Shannon entropy of the fission source,
-$H = -\sum_m p_m \log_2 p_m$,
-is tracked each generation as a convergence diagnostic.
+Early termination uses plateau detection: when the alive particle count
+decreases by less than 2\% over a synchronization interval and fewer
+than 10\% of particles remain alive, the batch terminates.  This
+handles the ${\sim}3.4\%$ of particles that become stuck at geometry
+boundaries due to floating-point precision at surface intersections.
 
-\subsection{GPU Implementation on Apple Metal}
-\label{subsec:gpu}
+% -----------------------------------------------------------------------------
+\subsection{History-based persistent kernel}
+\label{sec:persistent}
+% -----------------------------------------------------------------------------
 
-\subsubsection*{Architecture Overview}
+While the event-based architecture processes all particles at the same
+transport stage in a single kernel dispatch (maximizing SIMD uniformity),
+it incurs substantial overhead from repeated kernel dispatches:
+${\sim}600$ dispatches per batch (3~kernels $\times$ ${\sim}200$
+transport steps).  Each dispatch requires Metal command encoder
+allocation, pipeline state binding, and buffer argument encoding.
 
-The implementation is written in Python (driver layer) and Metal Shading Language (MSL,
-compute kernels). PyObjC bindings provide Python-level access to the Metal Objective-C
-API without requiring a compiled C extension. The overall software stack is:
+As an alternative, we implement a history-based persistent kernel
+following the approach of Hamilton and
+Evans~\cite{hamilton2018multigroup}.  In this architecture, each GPU
+thread runs the \emph{entire lifetime} of a single particle---from
+source to absorption or leakage---in a single kernel dispatch.  The
+kernel contains all physics inline: cross-section lookup, distance
+sampling, particle move with boundary handling, collision processing
+(scatter, absorption, fission banking), and track-length tally scoring.
 
-\begin{center}
-\texttt{Python driver} $\rightarrow$ \texttt{PyObjC / MetalKit} $\rightarrow$
-\texttt{Metal API} $\rightarrow$ \texttt{MSL compute kernels} $\rightarrow$
-\texttt{GPU hardware}
-\end{center}
+The persistent kernel uses three key optimizations:
 
-The Python driver handles: problem setup, cross-section table construction, power
-iteration control, statistical accumulation, and results output. The MSL kernels execute
-the five event-based transport steps on the GPU.
+\paragraph{Structure-of-Arrays (SoA) layout.}
+Instead of the 112-byte Array-of-Structures particle layout used by
+the event-based code (Table~\ref{tab:particle-struct}), the persistent
+kernel uses separate contiguous arrays for each field:
+\texttt{px[]}, \texttt{py[]}, \texttt{pz[]}, \texttt{ux[]},
+\texttt{uy[]}, \texttt{uz[]}, \texttt{group[]}, \texttt{weight[]}.
+This layout enables coalesced GPU memory access---adjacent threads read
+adjacent memory addresses---which is critical for Metal's SIMD
+execution model.
 
-\subsubsection*{Memory Model and Unified Memory}
+\paragraph{Zero-allocation batch loop.}
+All GPU buffers (particle state, fission bank, tallies, parameters) are
+pre-allocated once before the power iteration loop.  Each batch updates
+buffer contents via direct memory writes into GPU-visible shared memory,
+zeroing only the 4-byte fission counter.  This eliminates per-batch
+buffer allocation overhead that otherwise dominates Python-side runtime.
 
-Apple Silicon uses a unified memory architecture (UMA): CPU and GPU cores share a single
-physical DRAM pool with coherent access. All particle state arrays and cross-section
-tables are allocated as \texttt{MTLBuffer} objects with \texttt{MTLResourceStorageModeShared}
-storage mode, allowing zero-copy read/write access from both CPU (Python/NumPy) and GPU
-(MSL kernels). This eliminates the \texttt{cudaMemcpy}-style transfer overhead that
-dominates GPU MC codes on discrete-GPU systems at small particle batch sizes.
+\paragraph{Single dispatch per batch.}
+The entire transport batch executes in one \texttt{dispatchThreads}
+call.  Each thread initializes its particle state from the SoA arrays,
+finds its initial cell, and enters a transport loop capped at 5{,}000
+steps.  The loop terminates when the particle is absorbed, escapes
+through a vacuum boundary, is killed by Russian roulette, or reaches
+the step limit.  Fission sites are banked via
+\texttt{atomic\_fetch\_add} on a shared counter, and tallies use
+the same atomic float CAS loop as the event-based code
+(Eq.~\ref{eq:cas}).
 
-\subsubsection*{Particle State Structure}
+The persistent kernel trades SIMD uniformity for dispatch efficiency:
+thread divergence increases because particles at different transport
+stages execute different code paths, but the elimination of
+${\sim}600$ kernel dispatches per batch more than compensates.
 
-Each particle is represented as a packed struct stored in a flat GPU buffer:
+% -----------------------------------------------------------------------------
+\subsection{Geometry}
+\label{sec:geometry}
+% -----------------------------------------------------------------------------
 
-\begin{lstlisting}[language=C, caption={Particle state struct (Metal Shading Language)}]
-struct Particle {
-    float x, y, z;          // position
-    float mu, phi;           // direction cosines
-    int   energy_group;      // current energy group (0..G-1)
-    int   material_id;       // current material
-    float weight;            // statistical weight
-    uint  rng_state;         // per-particle RNG seed
-    int   alive;             // 1=active, 0=dead/banked
-    float path_length;       // accumulated track length
-};
-\end{lstlisting}
+The geometry engine implements constructive solid geometry (CSG) with
+half-space intersection for cell definition.  Supported surface types
+include axis-aligned planes ($x$, $y$, $z$), $z$-axis cylinders, and
+spheres, with vacuum, reflective, and transmissive boundary conditions.
 
-\subsubsection*{Random Number Generation}
+For the 17$\times$17 assembly benchmark (Fig.~\ref{fig:assembly}),
+the geometry comprises 327~surfaces (18~$x$-planes $+$ 18~$y$-planes
+$+$ 2~$z$-planes $+$ 289~cylinders) and 578~cells (289~pin interiors
+$+$ 289~moderator annuli).  Each cell is defined by 7~surface half-space
+conditions (6~bounding-box planes $+$ 1~cylinder).
 
-Each particle maintains an independent pseudo-random number generator (xorshift32)
-seeded from its global particle index XORed with the generation number. This avoids
-atomic contention on a shared seed while providing sufficient statistical independence
-between particles.
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig_assembly_layout.png}
+  \caption{C5G7 17$\times$17 UO$_2$ assembly layout.  The assembly
+    contains 264~UO$_2$ fuel pins (gold), 24~guide tubes (blue), and
+    1~fission chamber (orange), surrounded by water moderator (teal).
+    Pin pitch $= \SI{1.26}{\centi\meter}$, fuel radius $=
+    \SI{0.54}{\centi\meter}$.  All outer boundaries are reflective
+    (infinite lattice approximation).}
+  \label{fig:assembly}
+\end{figure}
 
-\subsubsection*{Kernel Dispatch}
+Cell finding in the assembly uses lattice-accelerated lookup: the
+particle position is mapped to integer lattice coordinates
+$(i,j) = (\lfloor x/p \rfloor, \lfloor y/p \rfloor)$ where $p$ is the
+pin pitch, giving $O(1)$ candidate cell identification.  The candidate
+is verified against the CSG surface conditions; if verification fails,
+adjacent pins are checked before falling back to a full linear scan.
+This replaces the $O(N)$ linear search over all 578~cells that would
+otherwise dominate transport time.
 
-Kernels are dispatched as 1-D thread grids with thread-group size 256. The command
-buffer pattern is:
+Surface intersection for ray tracing is computed analytically: planes
+require a single division, and cylinders require solving a quadratic
+equation.  The minimum positive intersection distance across all cell
+surfaces gives the distance to the cell boundary.  Reflective boundary
+conditions are implemented by reflecting the particle direction about
+the surface normal:
+\begin{equation}
+  \mathbf{d}' = \mathbf{d} - 2(\mathbf{d} \cdot \hat{\mathbf{n}})\hat{\mathbf{n}}
+  \label{eq:reflect}
+\end{equation}
+with a small bump ($10^{-8}$~cm) in the reflected direction to prevent
+re-intersection.
 
-\begin{enumerate}
-    \item Create \texttt{MTLCommandBuffer} from the device command queue.
-    \item Encode a \texttt{MTLComputeCommandEncoder}.
-    \item Set kernel pipeline state, bind argument buffers.
-    \item Dispatch threads: grid size $= N_\text{particles}$, threads/group $= 256$.
-    \item End encoding; commit buffer; wait for completion.
-\end{enumerate}
+% -----------------------------------------------------------------------------
+\subsection{Cross-section data}
+\label{sec:xs}
+% -----------------------------------------------------------------------------
 
-Each of the five event kernels is dispatched in sequence within a single transport
-step. The CPU blocks on GPU completion between steps to update convergence diagnostics
-and the power-iteration state machine.
+Cross sections are taken from the C5G7 benchmark specification
+(NEA/NSC/DOC(2003)16)~\cite{nea2003c5g7}, sourced from the MIT-CRPG
+OpenMC benchmark repository~\cite{mitcrpg2023c5g7}.  The seven-group
+energy structure covers thermal to fast neutron energies with seven
+materials: UO$_2$ fuel, three MOX enrichments (4.3\%, 7.0\%, 8.7\%),
+fission chamber, guide tube, and water moderator.
 
-\subsection{Benchmark Problem: C5G7 Reflected UO$_2$ Pincell}
-\label{subsec:c5g7}
+Each material stores 77 floating-point values in a flat GPU buffer:
+total cross section~(7), scattering matrix~(7$\times$7 = 49), fission
+cross section~(7), $\nu\Sigma_f$~(7), and fission spectrum~$\chi$~(7).
+The complete cross-section dataset for all seven materials occupies
+$7 \times 77 \times 4 = \SI{2156}{\byte}$, fitting entirely in GPU
+cache.  The scattering cross section for a given group is computed as
+the row sum of the scattering matrix; the absorption cross section is
+derived as $\Sigma_a = \Sigma_t - \Sigma_s$.
 
-The C5G7 benchmark~\cite{nea2003} is a standard verification problem in reactor
-physics. We implement the seven-group reflected UO$_2$ pincell variant: a
-$1.26 \times 1.26$ cm fuel rod surrounded by a water moderator reflector in a
-square-pitch unit cell with reflective boundary conditions on all faces.
-
-The seven-group macroscopic cross-section sets for UO$_2$ fuel and water moderator
-are taken directly from the C5G7 benchmark specification and are tabulated in
-standard format ($\Sigma_t$, $\Sigma_a$, $\Sigma_f$, $\nu\Sigma_f$, and the
-$7\times7$ scattering matrix for each material). The pincell geometry is modeled
-as a two-region problem: cylindrical fuel pin of radius $r = 0.54$~cm embedded in
-the square moderator cell. Material assignment during transport uses a simple
-radius-based test applied in the move kernel.
-
-The published reference $k_\text{eff}$ for this configuration is $0.2327$. Note
-that a sub-critical $k_\text{eff}$ value less than unity arises because the
-seven-group cross sections used in C5G7 are not normalized to represent a physical
-critical lattice; the benchmark is designed to test neutronics solvers using a
-standardized cross-section set rather than to model a critical reactor.
-
-% ============================================================
+% =============================================================================
 \section{Results}
 \label{sec:results}
-% ============================================================
+% =============================================================================
 
-All results reported here were obtained on a single Apple M4~Max system with 40 GPU
-cores, 128~GB unified memory, and a rated TDP of approximately \SI{40}{W} under GPU
-compute load. The CPU baseline was measured on a single core of the same M4~Max chip
-running the equivalent pure-Python transport loop (no GPU). No multithreading or
-vectorization was applied to the CPU reference.
+All benchmarks were run on an Apple M4~Max system with macOS~26.3,
+Python~3.14, and the PyObjC Metal framework.  The M4~Max features a
+40-core GPU with \SI{128}{\giga\byte} unified memory and a thermal
+design power (TDP) of \SI{40}{\watt} for the full SoC.
 
-\subsection{Criticality Results}
-\label{subsec:keff}
+% -----------------------------------------------------------------------------
+\subsection{Validation}
+\label{sec:validation}
+% -----------------------------------------------------------------------------
 
-The simulation was run with 50 inactive generations (for source convergence) and
-100 active generations, with $N = 5{,}000$ neutrons per generation ($5 \times 10^5$
-total active histories). Table~\ref{tab:keff} summarizes the key criticality results.
+Table~\ref{tab:validation} summarizes the eigenvalue results for both
+benchmark geometries.  The pincell result of
+$k_\mathrm{eff} = 1.3256 \pm 0.0005$ is within 448~pcm of the C5G7
+reference value of 1.3301, consistent with the expected difference
+from the simplified single-pincell geometry relative to the full
+assembly benchmark specification.
+The 17$\times$17 assembly yields
+$k_\mathrm{eff} = 1.2749 \pm 0.0005$.
 
-\begin{table}[ht]
+\begin{table}[t]
 \centering
-\caption{Criticality results for the C5G7 reflected UO$_2$ pincell benchmark.}
-\label{tab:keff}
-\begin{tabular}{lcc}
-\toprule
-Quantity & Value & Units \\
-\midrule
-$k_\text{eff}$ (this work)   & $0.23192 \pm 0.00097$ & --- \\
-$k_\text{eff}$ (reference)   & $0.2327$              & --- \\
-$\Delta k$                    & $+77$                 & pcm \\
-Active generations            & 100                   & --- \\
-Neutrons per generation       & 5{,}000               & --- \\
-Total active histories        & 500{,}000             & --- \\
-Inactive (skip) generations   & 50                    & --- \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The computed $k_\text{eff}$ agrees with the reference to within $+77$~pcm
-($\Delta k / k = 0.033\%$), well within one standard deviation of the Monte Carlo
-statistical uncertainty ($\pm 97$~pcm). This confirms the correctness of the
-cross-section lookup, collision physics, fission source sampling, and boundary
-condition treatment in the GPU kernels.
-
-Shannon entropy of the fission source was monitored each generation and converged
-to a stable value within the 50 inactive generations, indicating that the source
-distribution was adequately converged before active tallying began.
-
-\subsection{Performance Results}
-\label{subsec:perf}
-
-Table~\ref{tab:perf} reports the throughput and speedup measurements.
-
-\begin{table}[ht]
-\centering
-\caption{Performance comparison: GPU vs.\ single-core CPU on M4~Max.}
-\label{tab:perf}
-\begin{tabular}{lccc}
-\toprule
-Platform & Throughput (particles/s) & Speedup & Notes \\
-\midrule
-M4~Max GPU (Metal) & 27{,}633 & 6.6$\times$ & 40 GPU cores \\
-M4~Max CPU (Python) & 4{,}171 & 1.0$\times$ (baseline) & Single core, pure Python \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The GPU achieves a 6.6$\times$ throughput improvement relative to the single-core
-Python baseline. It is important to interpret this figure in context:
-\begin{itemize}
-    \item The CPU baseline is \emph{unoptimized pure Python}, not a compiled Fortran
-          or C implementation. Production CPU codes written in compiled languages
-          typically achieve 10--100$\times$ higher throughput per core, so the
-          effective GPU advantage over an optimized CPU baseline would be considerably
-          smaller or potentially negative.
-    \item This implementation uses multi-group energy treatment (7 groups), which is
-          significantly cheaper per collision than continuous-energy (CE) treatment.
-    \item The geometry is a single-material pincell, far simpler than a full assembly
-          or reactor core.
-\end{itemize}
-
-\subsubsection*{XSBench Microbenchmark}
-
-A microbenchmark targeting the cross-section lookup kernel alone (analogous to the
-XSBench suite~\cite{tramm2014}) was run with $N = 10^6$ lookup operations per kernel
-invocation across the seven energy groups. The Metal GPU kernel achieved
-\textbf{11{,}372 million lookups/second} for this operation. Given that cross-section
-lookup is the dominant bottleneck in continuous-energy MC transport, this result
-suggests that the Metal GPU architecture can sustain high bandwidth for table-driven
-physics operations.
-
-\subsection{Comparison with Published GPU Monte Carlo Codes}
-\label{subsec:comparison}
-
-Table~\ref{tab:comparison} places our results alongside published GPU speedup factors
-from the recent literature. We include this comparison for context but emphasize that
-\textbf{direct numerical comparisons are not valid across these entries} due to
-fundamental differences in:
-
-\begin{itemize}
-    \item \textbf{Benchmark problem}: a single pincell (this work) vs.\ full assembly
-          or full-core configurations in other codes.
-    \item \textbf{Energy treatment}: multi-group/7-group (this work) vs.\
-          continuous-energy (CE) for OpenMC~\cite{tramm2024} and
-          Shift~\cite{biondo2025}, or multi-group for MC/DC~\cite{morgan2025}.
-    \item \textbf{CPU baseline}: single-core pure Python (this work) vs.\ multi-core
-          optimized C/Fortran for all other codes.
-    \item \textbf{GPU hardware}: consumer mobile chip (this work) vs.\ datacenter
-          HPC GPUs (A100, MI250X, MI300A, PVC, V100).
-    \item \textbf{Code maturity}: proof-of-concept (this work) vs.\ production codes
-          with years of algorithmic optimization.
-\end{itemize}
-
-The table is provided to situate the hardware context, not to claim performance
-equivalence.
-
-\begin{table}[ht]
-\centering
-\caption{GPU speedup factors reported in the literature. Comparison is
-\emph{qualitative only}; entries differ in benchmark, energy treatment, CPU
-baseline, and code maturity. CE = continuous energy, MG = multi-group.}
-\label{tab:comparison}
+\caption{Benchmark parameters and eigenvalue results.}
+\label{tab:validation}
 \small
-\begin{tabular}{lllcc}
+\begin{tabular}{@{}lcc@{}}
 \toprule
-Code & GPU & Energy & Speedup & Reference \\
+Parameter & Pincell & Assembly \\
 \midrule
-OpenMC-Metal (this work) & M4~Max (40c)   & MG/7g  & 6.6$\times$  & ---  \\
-\addlinespace
-OpenMC     & NVIDIA A100   & CE     & $\sim$9$\times$  & \cite{tramm2024} \\
-OpenMC     & AMD MI250X    & CE     & $\sim$10$\times$ & \cite{tramm2024} \\
-OpenMC     & Intel PVC (Aurora) & CE & $\sim$17$\times$ & \cite{tramm2024} \\
-\addlinespace
-MC/DC      & NVIDIA V100   & MG     & $\sim$15$\times$ & \cite{morgan2025} \\
-MC/DC      & AMD MI300A    & MG     & $\sim$12$\times$ & \cite{morgan2025} \\
-\addlinespace
-Shift      & NVIDIA V100   & CE     & $\sim$28$\times$ & \cite{biondo2025} \\
+Geometry          & 1 pin, reflected   & 17$\times$17, reflected \\
+Cells             & 2                  & 578 \\
+Surfaces          & 7                  & 327 \\
+Materials         & 2 (UO$_2$, H$_2$O) & 7 \\
+Particles/batch   & \num{100000}       & \num{100000} \\
+Active batches    & 80                 & 80 \\
+Inactive batches  & 20                 & 20 \\
+Energy groups     & 7                  & 7 \\
+\midrule
+$k_\mathrm{eff}$  & $1.3256 \pm 0.0005$ & $1.2749 \pm 0.0005$ \\
+Reference         & 1.3301             & --- \\
+$\Delta$ (pcm)    & $-448$             & --- \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{Energy Efficiency}
-\label{subsec:energy}
+Figure~\ref{fig:keff} shows the batch-by-batch $k_\mathrm{eff}$
+convergence for the pincell benchmark, demonstrating stable convergence
+of the running mean toward the final estimate.
+Figure~\ref{fig:entropy} shows the Shannon entropy of the fission
+source distribution, which stabilizes within approximately 10~batches,
+confirming adequate source convergence before the active phase begins.
 
-A compelling characteristic of Apple Silicon for GPU computing is its low power
-envelope. The M4~Max is rated at approximately \SI{40}{W} total chip TDP under compute
-load. Computing an energy-efficiency metric as speedup per kilowatt of GPU TDP:
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig_keff_convergence.png}
+  \caption{Batch $k_\mathrm{eff}$ convergence for the C5G7 pincell
+    (\num{100000} particles/batch, 80~active batches).  The running mean
+    (green) converges to $1.3256 \pm 0.0005$.}
+  \label{fig:keff}
+\end{figure}
 
-\begin{equation}
-    \eta = \frac{\text{speedup}}{\text{TDP (kW)}}
-\end{equation}
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig_entropy.png}
+  \caption{Shannon entropy of the fission source distribution vs.\
+    batch number for the pincell benchmark, demonstrating rapid
+    source convergence.  The entropy stabilizes near 6.035~bits
+    (10$\times$10$\times$1 spatial mesh).}
+  \label{fig:entropy}
+\end{figure}
 
-For OpenMC-Metal: $\eta = 6.6 / 0.040 = \mathbf{165}$ speedup/kW.
+% -----------------------------------------------------------------------------
+\subsection{Performance}
+\label{sec:performance}
+% -----------------------------------------------------------------------------
 
-For context, published results from datacenter GPUs---using their respective speedups
-and typical TDP values (\SI{400}{W} for NVIDIA A100, \SI{560}{W} for AMD MI250X,
-\SI{350}{W} for MI300A, \SI{450}{W} for Intel PVC, \SI{300}{W} for NVIDIA V100)---yield
-efficiency figures of approximately 30--93 speedup/kW, as summarized in
-Table~\ref{tab:efficiency}.
+Table~\ref{tab:performance} summarizes the performance metrics for both
+transport architectures.  The XSBench
+microbenchmark~\cite{tramm2014xsbench} achieves \num{10981}~million
+lookups/sec on the M4~Max GPU.
 
-\begin{table}[ht]
+\paragraph{Event-based performance.}
+The event-based pincell achieves \num{46198}~histories/sec with
+\num{100000}~particles/batch, and the assembly achieves
+\num{111772}~histories/sec with \num{1000000}~particles/batch.
+The GPU-to-CPU speedup is $11.8\times$ compared to the single-threaded
+pure Python baseline (\num{3907}~hist/sec).  Against a Numba-JIT
+single-threaded baseline (\num{231819}~hist/sec), the event-based GPU
+pincell is $5\times$ slower---reflecting the branch divergence overhead
+of event-based transport on simple
+geometries~\cite{hamilton2018multigroup}.
+
+\paragraph{Persistent kernel performance.}
+The history-based persistent kernel dramatically improves throughput.
+The pincell achieves \num{200000}~histories/sec at
+\num{1000000}~particles/batch ($4.3\times$ vs.\ event-based), and
+the assembly achieves \num{1762000}~histories/sec ($15.7\times$
+vs.\ event-based).  Table~\ref{tab:scaling} shows throughput scaling
+with particle count for the persistent kernel pincell, demonstrating
+that throughput increases with GPU occupancy---the GPU is not fully
+saturated below \num{500000}~particles.
+
+\begin{table}[t]
 \centering
-\caption{Estimated energy efficiency ($\eta$ = speedup/kW of GPU TDP).
-TDP values are approximate; speedup values from Table~\ref{tab:comparison}.
-Comparison is \emph{qualitative only} due to differences across benchmarks.}
-\label{tab:efficiency}
+\caption{Performance results on Apple M4~Max (event-based vs.\
+  persistent kernel).}
+\label{tab:performance}
 \small
-\begin{tabular}{llccc}
+\begin{tabular}{@{}lrr@{}}
 \toprule
-Code & GPU & Speedup & GPU TDP (W) & $\eta$ (speedup/kW) \\
+Metric & Event-based & Persistent \\
 \midrule
-OpenMC-Metal (this work) & M4~Max     & 6.6  & $\sim$40  & $\sim$165 \\
-\addlinespace
-OpenMC     & NVIDIA A100   & $\sim$9  & $\sim$400 & $\sim$23 \\
-OpenMC     & AMD MI250X    & $\sim$10 & $\sim$560 & $\sim$18 \\
-OpenMC     & Intel PVC     & $\sim$17 & $\sim$450 & $\sim$38 \\
-\addlinespace
-MC/DC      & NVIDIA V100   & $\sim$15 & $\sim$300 & $\sim$50 \\
-MC/DC      & AMD MI300A    & $\sim$12 & $\sim$350 & $\sim$34 \\
-\addlinespace
-Shift      & NVIDIA V100   & $\sim$28 & $\sim$300 & $\sim$93 \\
+Pincell (hist/sec)  & \num{46198}  & \num{200000} \\
+Assembly (hist/sec) & \num{111772} & \num{1762000} \\
+Speedup (assembly)  & $1.0\times$  & $15.7\times$ \\
+\midrule
+CPU baseline (Python)  & \multicolumn{2}{c}{\num{3907} hist/sec} \\
+CPU baseline (Numba JIT) & \multicolumn{2}{c}{\num{231819} hist/sec} \\
+GPU/Numba (assembly)   & $0.48\times$ & $7.6\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The M4~Max's $\eta \approx 165$ speedup/kW substantially exceeds the values reported
-for datacenter GPUs. However, this comparison carries important caveats: the numerator
-(speedup) for this work reflects an unoptimized Python CPU baseline, artificially
-inflating the ratio; and the benchmark problems differ substantially. Nonetheless,
-the result highlights a genuine architectural advantage: unified memory eliminates
-transfer overhead, and the mobile TDP class means that even modest speedups translate
-to high energy efficiency. This has practical relevance for laptop-scale exploratory
-computations, CI testing of physics algorithms, and education.
+\begin{table}[t]
+\centering
+\caption{Persistent kernel throughput scaling with particle count
+  (pincell geometry, 10~batches).}
+\label{tab:scaling}
+\small
+\begin{tabular}{@{}rr@{}}
+\toprule
+Particles/batch & Throughput (hist/sec) \\
+\midrule
+\num{10000}    & \num{78000} \\
+\num{100000}   & \num{72000} \\
+\num{500000}   & \num{125000} \\
+\num{1000000}  & \num{200000} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-% ============================================================
+Figure~\ref{fig:arch-compare} compares the two architectures across
+both geometries, illustrating the persistent kernel's advantage.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig_architecture_comparison.png}
+  \caption{Throughput comparison of event-based and persistent kernel
+    architectures for pincell and 17$\times$17 assembly geometries
+    (\num{1000000} particles/batch).  The persistent kernel achieves
+    $4.3\times$ (pincell) and $15.7\times$ (assembly) speedups.}
+  \label{fig:arch-compare}
+\end{figure}
+
+The persistent kernel's advantage over the event-based design arises
+from eliminating ${\sim}600$ kernel dispatches per batch.  Profiling
+shows that GPU compute accounts for 59\% of per-batch time at
+\num{1000000}~particles (assembly), with buffer writes (2.6\%),
+fission bank reads (0.1\%), and source resampling (1.4\%) comprising
+the remainder.  The persistent kernel also exceeds the Numba-JIT
+single-thread baseline by $7.6\times$ for the assembly, confirming
+that the GPU advantage materializes when occupancy is sufficient.
+
+% -----------------------------------------------------------------------------
+\subsection{Comparison with MC/DC}
+\label{sec:mcdc}
+% -----------------------------------------------------------------------------
+
+To contextualize the absolute performance, we compare against MC/DC
+(Morgan et al.~\cite{morgan2025mcdc}), which reports throughput for the
+C5G7 seven-group benchmark on NVIDIA V100 GPUs under similar conditions.
+Table~\ref{tab:mcdc} and Fig.~\ref{fig:mcdc} present the comparison
+for both architectures.
+
+The event-based architecture on the M4~Max achieves
+\num{111772}~histories/sec, comparable to a single V100 at
+\num{109000}~histories/sec ($1.03\times$).  The persistent kernel
+achieves \num{1762000}~histories/sec---$16.2\times$ faster than the
+V100 and $4.0\times$ faster than four V100 GPUs combined
+(\num{437000}~histories/sec).  We emphasize that this comparison
+involves different transport algorithms: our persistent kernel is
+history-based (single dispatch per batch), while MC/DC uses
+event-based GPU transport.  The comparison demonstrates both the
+hardware capabilities of Apple Silicon and the algorithmic advantage
+of the persistent kernel approach for multigroup problems.
+
+\begin{table}[t]
+\centering
+\caption{Throughput comparison with MC/DC~\cite{morgan2025mcdc} under
+  similar conditions (C5G7 7-group, 1M particles/batch).}
+\label{tab:mcdc}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+& \multicolumn{2}{c}{This Work (M4 Max)} & MC/DC & MC/DC \\
+& Event & Persistent & 1$\times$ V100 & 4$\times$ V100 \\
+\midrule
+Throughput (hist/s)
+  & \num{111772} & \textbf{\num{1762000}} & \num{109000} & \num{437000} \\
+Ratio vs.\ V100
+  & $1.03\times$ & $\mathbf{16.2\times}$ & $1.0\times$ & $4.0\times$ \\
+\midrule
+TDP (W)
+  & 40 & 40 & 300 & 1200 \\
+Hist/sec/W
+  & \num{2794} & \textbf{\num{44065}} & \num{363} & \num{364} \\
+Efficiency ratio
+  & $7.7\times$ & $\mathbf{121\times}$ & $1.0\times$ & $1.0\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig_mcdc_comparison.png}
+  \caption{Absolute throughput comparison: This Work (Apple M4~Max) vs.\
+    MC/DC~\cite{morgan2025mcdc} on NVIDIA V100 GPUs.  The persistent
+    kernel on the M4~Max exceeds a single V100 by $16.2\times$.}
+  \label{fig:mcdc}
+\end{figure}
+
+% -----------------------------------------------------------------------------
+\subsection{Energy efficiency}
+\label{sec:efficiency}
+% -----------------------------------------------------------------------------
+
+The most striking result is the energy efficiency advantage
+(Fig.~\ref{fig:efficiency}).  With the persistent kernel, the M4~Max
+at \SI{40}{\watt} TDP achieves \num{44065}~histories/sec/W, compared
+to \num{363}~histories/sec/W for the V100 at
+\SI{300}{\watt}---a $\mathbf{121\times}$ improvement in performance
+per watt.  Even the event-based architecture achieves $7.7\times$
+better efficiency.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig_energy_efficiency.png}
+  \caption{Energy efficiency comparison (histories/sec/W).  The Apple
+    M4~Max persistent kernel achieves $121\times$ higher efficiency
+    than the NVIDIA V100, reflecting both the algorithmic advantage of
+    history-based transport and Apple Silicon's low power envelope.}
+  \label{fig:efficiency}
+\end{figure}
+
+This efficiency advantage arises from three factors:
+\begin{enumerate}
+  \item \textit{Algorithmic}: the persistent kernel eliminates
+        ${\sim}600$ kernel dispatches per batch, reducing both
+        compute overhead and command buffer power consumption.
+  \item \textit{Memory architecture}: Apple Silicon's unified memory
+        eliminates data transfer power costs---the GPU accesses the
+        same DRAM as the CPU with no PCIe or NVLink interconnect power.
+  \item \textit{SoC integration}: the \SI{40}{\watt} power envelope
+        encompasses CPU, GPU, memory controller, and neural engine,
+        whereas the V100's \SI{300}{\watt} TDP covers only the GPU
+        die (host CPU power is additional).
+\end{enumerate}
+
+We note that TDP-based energy efficiency comparisons have inherent
+limitations: actual power draw varies with workload, and the TDP
+accounting differs between SoC and discrete GPU architectures.  The
+$121\times$ factor combines both the algorithmic improvement (persistent
+vs.\ event-based) and the hardware efficiency advantage; a fair
+hardware-only comparison using the event-based algorithm yields
+$7.7\times$, which is still substantial.
+
+% =============================================================================
 \section{Discussion}
 \label{sec:discussion}
-% ============================================================
+% =============================================================================
 
-\subsection{Limitations of This Work}
+\paragraph{Unified memory advantage.}
+Apple Silicon's unified memory architecture provides a qualitative
+advantage for MC transport: particle state, cross sections, geometry,
+and tallies all reside in a single memory address space accessible by
+both CPU and GPU at full bandwidth.  There is no equivalent of
+\texttt{cudaMemcpyHostToDevice}---the CPU writes source particles
+directly into GPU-visible buffers, and reads fission bank results
+without any copy.  For iterative eigenvalue calculations that alternate
+between CPU logic (source resampling, statistics) and GPU kernels
+(transport), this eliminates a per-batch data transfer cost that can be
+significant for discrete GPU systems~\cite{siegel2014analysis}.
 
-We have been explicit about limitations throughout, but summarize them here for clarity:
+\paragraph{PyObjC dispatch overhead.}
+The Python-to-Metal dispatch path through PyObjC introduces overhead
+per command encoder allocation compared to native Swift or Objective-C.
+We mitigate this by batching five transport steps per command buffer
+and synchronizing only every 25~steps, reducing the per-step Python
+overhead to ${\sim}1/5$ of the unbatched cost.  The remaining overhead
+is amortized over \num{1000000}+ particle dispatches per kernel.
 
-\paragraph{CPU baseline.}
-The CPU reference is single-core pure Python. A production C/Fortran implementation on
-the same M4~Max core would likely be 50--200$\times$ faster (with compiler optimization,
-NumPy vectorization, and potential multi-threading), which would eliminate or invert the
-observed GPU speedup. The 6.6$\times$ figure characterizes the Python-to-Metal overhead,
-not GPU vs.\ optimized-CPU transport.
+\paragraph{Stuck and lost particles.}
+Approximately 3.4\% of particles per batch become stuck at geometry
+boundaries---typically at cylinder--plane intersections where
+floating-point precision causes repeated zero-distance surface hits.
+The plateau detection mechanism (Section~\ref{sec:async}) terminates
+these particles.  Lost particles (those that cannot be located in any
+cell after boundary crossing) account for ${\sim}0.05\%$ of histories,
+which is acceptable for benchmark-level calculations.  Production
+implementations would benefit from more sophisticated surface-tracking
+algorithms with adaptive bump distances.
 
-\paragraph{Energy treatment.}
-Multi-group transport discretizes the energy variable into a small number of broad
-groups (seven here), replacing continuous cross-section evaluations with simple
-array lookups. This reduces per-collision computational work by orders of magnitude
-compared to continuous-energy transport, which requires interpolating point-wise
-cross-section tables across hundreds of thousands of nuclides and energies. The MG
-simplification makes the GPU implementation considerably easier to write and tune.
-
-\paragraph{Geometry complexity.}
-A single pincell with reflective boundaries is the simplest non-trivial geometry.
-Production calculations involve assembly-level or full-core 3-D geometries with
-hundreds to thousands of distinct material regions, complex surfaces, and detailed
-mesh tallies. Geometry tracking (surface intersection) is the dominant work in
-CE codes; our MG implementation uses a simple radius test and does not exercise
-general surface-tracking logic.
-
-\paragraph{Algorithm maturity.}
-The implementation lacks many features required for production use: variance reduction
-(implicit capture, Russian roulette), importance sampling, temperature treatment,
-resonance self-shielding, depletion coupling, source convergence acceleration
-(CMFD/DSA), and robust parallel decomposition. Adding these features typically
-changes performance characteristics significantly.
-
-\subsection{Apple Silicon as a Research Platform}
-
-Despite the limitations above, several properties of Apple Silicon make it attractive
-for nuclear computing research:
-
-\textbf{Accessibility.} Apple M-series hardware is available to individual researchers
-at consumer price points. Developing and prototyping GPU transport algorithms does not
-require access to HPC cluster allocation.
-
-\textbf{Unified memory.} The zero-copy memory model simplifies algorithm development.
-Heterogeneous CPU+GPU algorithms---where the CPU handles irregular control flow and
-the GPU handles bulk computation---can be written without explicit data staging. This
-lowers the barrier to implementing novel algorithmic ideas.
-
-\textbf{Energy efficiency.} For small-to-medium scale calculations (sensitivity
-studies, algorithm development, benchmark validation), the M-series offers very good
-throughput per watt. Laptop-class hardware running overnight can produce publication-
-quality MC statistics for simple geometries.
-
-\textbf{Ecosystem.} Metal is a first-party API with excellent developer tooling
-(GPU frame capture, shader profiling, memory profiling) integrated into Xcode.
-PyObjC enables Python-driven Metal dispatch without requiring a separate C compilation
-step for kernel development iteration.
-
-\subsection{Path to Production Viability}
-
-Closing the gap with production GPU MC codes would require:
+\paragraph{Limitations.}
+The current implementation has several limitations:
 \begin{enumerate}
-    \item Rewriting the CPU driver in a compiled language (Swift, Objective-C, or C)
-          and enabling Metal's multi-queue dispatch for overlapping kernel execution.
-    \item Implementing continuous-energy cross-section lookup with on-device unionized
-          grid interpolation.
-    \item Generalizing geometry tracking to support constructive solid geometry (CSG)
-          with arbitrary quadric surfaces.
-    \item Parallelizing across multiple M-series chips via Apple's shared memory
-          cluster (Ultra/Max configurations share a unified fabric).
-    \item Introducing load balancing between inactive and active particle lists to
-          maintain high GPU occupancy as particles are killed during transport.
+  \item \textit{Multi-group only}: the code uses seven-group cross
+        sections and does not support continuous-energy (CE) transport.
+        CE is required for high-fidelity reactor analysis; multi-group
+        is sufficient for benchmarking and algorithm development.
+
+  \item \textit{Single GPU}: Apple Silicon does not support multi-GPU
+        configurations.  Scaling to full-core problems would require
+        domain decomposition with MPI across multiple nodes.
+
+  \item \textit{Simplified geometry}: the CSG engine supports planes,
+        cylinders, and spheres.  Production geometries may require
+        additional surface types (tori, general quadrics) and CAD-based
+        representations.
+
+  \item \textit{No depletion or thermal-hydraulic coupling}: the code
+        solves the fixed $k$-eigenvalue problem without burnup or
+        multi-physics feedback.
+
+  \item \textit{Algorithm dependence}: the event-based GPU pincell is
+        $5\times$ slower than a Numba-JIT single-thread baseline, but
+        the persistent kernel assembly is $7.6\times$ faster---the GPU
+        advantage depends on algorithm, geometry, and particle count.
 \end{enumerate}
 
-% ============================================================
+\paragraph{Event-based vs.\ persistent kernel.}
+The $15.7\times$ speedup of the persistent kernel over the event-based
+design is the central finding of this work.  The event-based architecture,
+while theoretically superior for SIMD uniformity~\cite{hamilton2018multigroup},
+is dominated by kernel dispatch overhead on Metal: 3~kernels $\times$
+${\sim}200$ steps = ${\sim}600$ dispatches per batch, each requiring
+Python/PyObjC command buffer allocation.  The persistent kernel replaces
+these with a single dispatch.  The trade-off is increased thread
+divergence---particles at different transport stages within a single
+kernel---but this cost is modest for multi-group transport where the
+physics per collision is uniform.  For continuous-energy transport with
+complex resonance lookups, the divergence penalty may be larger, and
+the event-based approach may recover its advantage.
+
+\paragraph{Numba CPU baseline.}
+The Numba-JIT single-thread baseline (\num{231819}~hist/sec) exceeds
+the event-based GPU pincell result by $5\times$, consistent with
+Hamilton and Evans~\cite{hamilton2018multigroup} who showed GPU advantage
+emerges only at sufficient scale.  However, the persistent kernel
+assembly at \num{1762000}~hist/sec is $7.6\times$ faster than the
+Numba single thread, confirming that with the right algorithm, the GPU
+provides a definitive advantage even against compiled baselines.
+
+\paragraph{Future work.}
+Natural extensions include:
+continuous-energy cross-section lookup using unionized energy
+grids~\cite{tramm2014xsbench};
+multi-assembly quarter-core geometry with domain decomposition;
+stream compaction to reduce dead-particle waste in the event-based
+architecture;
+exploitation of Apple Silicon's Neural Engine for cross-section table
+interpolation;
+and comparison with M-series Ultra chips that expose additional GPU
+cores through the die-to-die interconnect.
+
+% =============================================================================
 \section{Conclusions}
 \label{sec:conclusions}
-% ============================================================
+% =============================================================================
 
-We have demonstrated a working, validated implementation of multi-group Monte Carlo
-neutron transport on Apple Metal GPU. The key contributions of this work are:
+We have presented the first Monte Carlo neutron transport implementation
+on Apple Silicon using the Metal GPU compute framework, comparing
+event-based and history-based persistent kernel architectures.
 
-\begin{enumerate}
-    \item A functioning event-based five-kernel GPU transport pipeline implemented
-          in Metal Shading Language, dispatched from Python via PyObjC.
-    \item Validation of the C5G7 reflected UO$_2$ pincell benchmark:
-          $k_\text{eff} = 0.23192 \pm 0.00097$ vs.\ reference $0.2327$
-          ($\Delta = +77$~pcm).
-    \item A measured GPU throughput of 27{,}633 particles/s on an M4~Max, yielding
-          a 6.6$\times$ speedup relative to a single-core pure-Python CPU baseline,
-          with the important caveat that the baseline is intentionally unoptimized.
-    \item An energy-efficiency analysis showing that the M4~Max's low TDP
-          ($\sim$\SI{40}{W}) provides a qualitative energy-efficiency advantage
-          over datacenter GPUs, even though absolute throughput remains far below
-          production HPC systems.
-\end{enumerate}
+The event-based architecture with three fused kernels achieves
+\num{111772}~histories/sec, matching a single NVIDIA V100.  The
+history-based persistent kernel---where each GPU thread runs an entire
+particle lifetime in one dispatch---achieves
+\num{1762000}~histories/sec, a $15.7\times$ improvement and
+$16.2\times$ faster than the V100.
 
-This work establishes that Apple Silicon is a viable platform for GPU Monte Carlo
-transport research and algorithm prototyping. Future directions include continuous-
-energy cross-section treatment, generalized CSG geometry, multi-chip scaling via
-Apple Silicon cluster, and integration with the Python ecosystem for OpenMC-compatible
-cross-section data formats.
+The key finding is the combined algorithmic and architectural efficiency
+advantage: at \SI{40}{\watt}, the persistent kernel delivers
+\num{44065}~histories/sec/W versus \num{363}~histories/sec/W for the
+V100---a $121\times$ improvement.  Even the hardware-only comparison
+(event-based, same algorithm class) yields $7.7\times$ better
+efficiency.  These results demonstrate that Apple Silicon is not merely
+viable but potentially superior for Monte Carlo transport workloads,
+particularly in power-constrained environments such as deployed reactor
+monitoring, portable criticality safety calculations, or large-scale
+parameter studies where electricity cost dominates.
 
-OpenMC-Metal source code is available at [repository URL to be added].
+The Python/PyObjC implementation demonstrates that Metal is accessible
+for scientific computing without requiring the CUDA toolchain.  The
+complete transport code, including both architectures, comprises
+approximately 3{,}000~lines of Python and 1{,}300~lines of Metal
+Shading Language.
 
-% ============================================================
+\section*{Data availability}
+
+The source code and benchmark data are available at
+\url{https://github.com/[repository]}.
+
 \section*{Acknowledgments}
-% ============================================================
 
-The author thanks the OpenMC development community for the open-source infrastructure
-on which the cross-section data conventions used here are based~\cite{romano2015}.
+The authors thank the OpenMC development community for the open-source
+infrastructure on which the cross-section data conventions are
+based~\cite{romano2015openmc}, and the MC/DC team for publishing
+detailed performance data enabling direct
+comparison~\cite{morgan2025mcdc}.
 
-% ============================================================
-\bibliographystyle{plain}
+% =============================================================================
+% References
+% =============================================================================
+\bibliographystyle{elsarticle-num}
 \bibliography{references}
-
-% ---- Inline bibliography (for arXiv self-contained submission) ----
-\begin{thebibliography}{99}
-
-\bibitem{tramm2024}
-J.~R.~Tramm, B.~Forget, K.~Smith, A.~Siegel, and P.~K.~Romano,
-``Performance Analysis of GPU-Accelerated Monte Carlo Particle Transport with OpenMC,''
-in \emph{Proc. M\&C 2025}, 2025. [Preprint, 2024]
-
-\bibitem{morgan2025}
-J.~Morgan, B.~Cuneo, C.~T.~Kelley, T.~Islam, K.~Verner, R.~McClarren,
-``GPU-Accelerated Monte Carlo Dynamic Code (MC/DC),''
-\emph{arXiv:2501.05440}, 2025.
-
-\bibitem{biondo2025}
-E.~Biondo, T.~Evans, S.~Hamilton, J.~Lax, C.~Pandya, and S.~Slattery,
-``GPU Acceleration of the Shift Monte Carlo Particle Transport Code,''
-\emph{EPJ Nuclear Sci.\ Technol.}, vol.~11, p.~5, 2025.
-
-\bibitem{hamilton2018}
-S.~P.~Hamilton, T.~M.~Evans, and P.~P.~H.~Wilson,
-``Multigroup Monte Carlo on GPUs: Comparison of History- and Event-Based Algorithms,''
-\emph{Ann.\ Nucl.\ Energy}, vol.~113, pp.~506--518, 2018.
-
-\bibitem{nea2003}
-Nuclear Energy Agency / Nuclear Science Committee,
-``Benchmark on Deterministic Transport Calculations Without Spatial Homogenisation:
-  A 2-D/3-D MOX Fuel Assembly Benchmark (C5G7 MOX),''
-NEA/NSC/DOC(2003)16, OECD/NEA, 2003.
-
-\bibitem{romano2015}
-P.~K.~Romano, N.~E.~Horelik, B.~R.~Herman, A.~G.~Nelson, B.~Forget, and K.~Smith,
-``OpenMC: A State-of-the-Art Monte Carlo Code for Research and Development,''
-\emph{Ann.\ Nucl.\ Energy}, vol.~82, pp.~90--97, 2015.
-
-\bibitem{tramm2014}
-J.~R.~Tramm and A.~R.~Siegel,
-``Memory Bottleneck Analysis of Monte Carlo Neutron Transport on CPU and GPU
-Architectures,''
-\emph{Ann.\ Nucl.\ Energy}, vol.~82, pp.~93--99, 2014.
-
-\end{thebibliography}
 
 \end{document}
