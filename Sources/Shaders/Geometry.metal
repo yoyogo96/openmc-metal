@@ -193,11 +193,70 @@ inline bool point_in_cell(float3 pos,
 
 /// Search all cells and return the index of the first cell that contains `pos`.
 /// Returns -1 when the particle is lost (outside every defined cell).
+///
+/// Includes a lattice fast-path for 17x17 assembly geometry (578 cells):
+/// computes the candidate cell directly from position using pin-lattice
+/// coordinates, then verifies with point_in_cell.  Falls back to linear scan
+/// only when the fast guess fails (e.g. particle on boundary).
 inline int find_cell(float3 pos,
                      device const GPUCell*        cells,
                      uint                          numCells,
                      device const GPUCellSurface* cellSurfaces,
                      device const GPUSurface*     surfaces) {
+
+    // --- Lattice fast-path for 17x17 assembly (578 = 17*17*2 cells) ---
+    if (numCells == 578) {
+        float lattice_pitch = 1.26f;
+        uint  lattice_N     = 17;
+        float halfPitch     = lattice_pitch * 0.5f;
+        float fuel_R2       = 0.54f * 0.54f;
+
+        int col = clamp(int(pos.x / lattice_pitch), 0, int(lattice_N) - 1);
+        int row = clamp(int(pos.y / lattice_pitch), 0, int(lattice_N) - 1);
+
+        float cx = float(col) * lattice_pitch + halfPitch;
+        float cy = float(row) * lattice_pitch + halfPitch;
+        float dx = pos.x - cx;
+        float dy = pos.y - cy;
+
+        uint pin_idx = uint(row) * lattice_N + uint(col);
+        int candidate;
+        if (dx * dx + dy * dy < fuel_R2) {
+            candidate = int(pin_idx * 2);       // pin interior
+        } else {
+            candidate = int(pin_idx * 2 + 1);   // moderator annulus
+        }
+
+        // Verify candidate (handles z-bounds, edge cases)
+        if (point_in_cell(pos, cells[candidate], cellSurfaces, surfaces)) {
+            return candidate;
+        }
+
+        // Try the other half of the same pin
+        int alt = (candidate & 1) ? candidate - 1 : candidate + 1;
+        if (uint(alt) < numCells &&
+            point_in_cell(pos, cells[alt], cellSurfaces, surfaces)) {
+            return alt;
+        }
+
+        // Try adjacent pins (handles boundary cases)
+        for (int dr = -1; dr <= 1; dr++) {
+            for (int dc = -1; dc <= 1; dc++) {
+                if (dr == 0 && dc == 0) continue;
+                int nr = row + dr;
+                int nc = col + dc;
+                if (nr < 0 || nr >= int(lattice_N) || nc < 0 || nc >= int(lattice_N)) continue;
+                uint adj_pin = uint(nr) * lattice_N + uint(nc);
+                int c0 = int(adj_pin * 2);
+                int c1 = c0 + 1;
+                if (point_in_cell(pos, cells[c0], cellSurfaces, surfaces)) return c0;
+                if (point_in_cell(pos, cells[c1], cellSurfaces, surfaces)) return c1;
+            }
+        }
+        // Fall through to linear scan as last resort
+    }
+
+    // --- Linear scan (small geometries or lattice fallback) ---
     for (uint i = 0; i < numCells; i++) {
         if (point_in_cell(pos, cells[i], cellSurfaces, surfaces)) {
             return int(i);

@@ -56,7 +56,8 @@ class Simulation:
     def __init__(self, engine: MetalEngine, geometry: GeometryData,
                  materials_buffer, num_particles: int = 100_000,
                  num_batches: int = 100, num_inactive: int = 50,
-                 num_groups: int = 7):
+                 num_groups: int = 7, cell_finder=None,
+                 fallback_source=None):
         self.engine = engine
         self.geometry = geometry
         self.materials_buffer = materials_buffer
@@ -64,6 +65,8 @@ class Simulation:
         self.num_batches = num_batches
         self.num_inactive = num_inactive
         self.num_groups = num_groups
+        self.cell_finder = cell_finder
+        self.fallback_source = fallback_source
 
         self.kernels = TransportKernels(engine)
         self.collision = CollisionKernel(engine)
@@ -116,7 +119,8 @@ class Simulation:
             self.engine.zero_buffer(self.lost_count_buffer, 4)
 
             # Seed particles from current source
-            self.particle_buf.seed_from_source(current_source, batch_idx)
+            self.particle_buf.seed_from_source(current_source, batch_idx,
+                                               cell_finder=self.cell_finder)
 
             # Update params with current k-eff
             self._write_params()
@@ -199,50 +203,72 @@ class Simulation:
         sync (waitUntilCompleted) when we need to read results on CPU.
         Between syncs, command buffers are committed without waiting,
         allowing the GPU to pipeline work continuously.
+
+        Early termination via plateau detection: when alive count stops
+        decreasing, remaining particles are stuck at geometry boundaries.
         """
-        max_steps = 5000
-        check_interval = 25  # check all_dead every N steps
+        max_steps = 50000
+        # Batch multiple steps per command buffer to reduce PyObjC overhead
+        steps_per_cmd = 5
+        check_interval = 25  # check alive count every N steps
 
         last_cmd = None
+        step = 0
+        prev_alive = self.num_particles
 
-        for step in range(max_steps):
+        while step < max_steps:
             cmd = self.engine.command_queue.commandBuffer()
 
-            # 1. Fused XS Lookup + Distance to Collision
-            self.kernels.dispatch_xs_lookup_and_distance(
-                self.particle_buf.buffer, self.materials_buffer,
-                self.geometry.cell_buffer, self.params_buffer,
-                self.num_particles, cmd
-            )
+            # Encode multiple steps into one command buffer
+            batch_end = min(step + steps_per_cmd, max_steps)
+            for _ in range(step, batch_end):
+                # 1. Fused XS Lookup + Distance to Collision
+                self.kernels.dispatch_xs_lookup_and_distance(
+                    self.particle_buf.buffer, self.materials_buffer,
+                    self.geometry.cell_buffer, self.params_buffer,
+                    self.num_particles, cmd
+                )
 
-            # 2. Move Particle (standalone - complex geometry)
-            self.kernels.dispatch_move(
-                self.particle_buf.buffer,
-                self.geometry.surface_buffer,
-                self.geometry.cell_buffer,
-                self.geometry.cell_surface_buffer,
-                self.params_buffer, self.lost_count_buffer,
-                self.num_particles, cmd
-            )
+                # 2. Move Particle (standalone - complex geometry)
+                self.kernels.dispatch_move(
+                    self.particle_buf.buffer,
+                    self.geometry.surface_buffer,
+                    self.geometry.cell_buffer,
+                    self.geometry.cell_surface_buffer,
+                    self.params_buffer, self.lost_count_buffer,
+                    self.num_particles, cmd
+                )
 
-            # 3. Fused Collision + Tally
-            self.collision.dispatch_fused(
-                self.particle_buf.buffer, self.materials_buffer,
-                self.fission_bank, self.params_buffer,
-                self.tally.flux_buffer, self.tally.fission_buffer,
-                self.num_particles, cmd
-            )
+                # 3. Fused Collision + Tally
+                self.collision.dispatch_fused(
+                    self.particle_buf.buffer, self.materials_buffer,
+                    self.fission_bank, self.params_buffer,
+                    self.tally.flux_buffer, self.tally.fission_buffer,
+                    self.num_particles, cmd
+                )
 
             cmd.commit()
             last_cmd = cmd
+            step = batch_end
 
-            # Only sync and check periodically to reduce CPU-GPU overhead
-            if (step + 1) % check_interval == 0:
+            # Periodically sync and check alive count
+            if step % check_interval == 0:
                 cmd.waitUntilCompleted()
-                if self.particle_buf.all_dead():
-                    return step + 1
+                n_alive = self.particle_buf.alive_count()
+                if n_alive == 0:
+                    return step
 
-        # Final sync before returning to ensure all GPU work is complete
+                # Plateau detection: if alive count barely dropped and
+                # we're past the initial transient, remaining particles
+                # are stuck at geometry boundaries (infinite loops)
+                if step >= 200 and prev_alive > 0:
+                    drop_frac = (prev_alive - n_alive) / max(prev_alive, 1)
+                    if drop_frac < 0.02 and n_alive < self.num_particles * 0.1:
+                        return step
+
+                prev_alive = n_alive
+
+        # Final sync before returning
         if last_cmd is not None:
             last_cmd.waitUntilCompleted()
 
@@ -252,6 +278,8 @@ class Simulation:
         """Resample fission sites for next batch source via random sampling with replacement."""
         import random
         if not sites:
+            if self.fallback_source is not None:
+                return self.fallback_source(self.num_particles, self.num_groups)
             return source_sampler(self.num_particles, self.num_groups)
 
         return random.choices(sites, k=self.num_particles)

@@ -198,8 +198,23 @@ def _fix_reflection_logic(source: str) -> str:
         // nudge particle forward to escape the surface and retry
         if (d < 1.0e-6f) {
             p.position += 1.0e-5f * p.direction;
-            // Don't change event — will be retried as MOVE next step
-            p.event = EVENT_MOVE;
+            // Re-locate cell after nudge (may have crossed a curved surface)
+            int nudgeCell = find_cell(p.position, cells, params.numCells,
+                                      cellSurfaces, surfaces);
+            if (nudgeCell < 0) {
+                p.alive = 0;
+                p.event = EVENT_DEAD;
+                atomic_fetch_add_explicit(lostParticleCount, 1, memory_order_relaxed);
+                return;
+            }
+            uint oldMat = cells[p.cellIndex].materialIndex;
+            p.cellIndex = uint(nudgeCell);
+            uint newMat = cells[nudgeCell].materialIndex;
+            if (oldMat != newMat) {
+                p.event = EVENT_XS_LOOKUP;
+            } else {
+                p.event = EVENT_MOVE;
+            }
             return;
         }
         p.distanceTraveled = d;

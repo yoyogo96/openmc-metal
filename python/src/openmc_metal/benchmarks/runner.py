@@ -63,6 +63,8 @@ def main():
                         help='Output JSON file path')
     parser.add_argument('--report', type=str, default='benchmark_report.pdf',
                         help='Output PDF report path')
+    parser.add_argument('--assembly', action='store_true',
+                        help='Run 17x17 assembly benchmark instead of pincell')
     parser.add_argument('--verbose', action='store_true',
                         help='Print every batch')
     args = parser.parse_args()
@@ -107,6 +109,21 @@ def main():
         num_inactive=args.inactive,
         verbose=args.verbose,
     )
+
+    # C5G7 17x17 Assembly (optional)
+    if args.assembly:
+        from .assembly import AssemblyBenchmark
+
+        print("\n" + "=" * 60)
+        print("PHASE 2.5: C5G7 17x17 Assembly Benchmark")
+        print("=" * 60)
+        assembly = AssemblyBenchmark(engine)
+        results['c5g7_assembly'] = assembly.run(
+            num_particles=args.particles,
+            num_batches=args.batches,
+            num_inactive=args.inactive,
+            verbose=args.verbose,
+        )
 
     # CPU Baseline (for GPU speedup comparison)
     print("\n" + "=" * 60)

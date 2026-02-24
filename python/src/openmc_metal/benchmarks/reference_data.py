@@ -155,6 +155,17 @@ REFERENCES = [
 ]
 
 
+# MC/DC absolute throughput from Morgan et al. 2025 (arXiv:2501.05440)
+# C5G7 7-group assembly benchmark, 1M particles/batch, 150 batches
+MCDC_THROUGHPUT = {
+    'single_v100': 109_000,      # ~109K histories/sec per GPU
+    'four_v100': 437_000,        # ~437K histories/sec (4x V100)
+    'single_mi300a': 130_000,    # estimated from speedup ratios
+    'source': 'Morgan et al. 2025, arXiv:2501.05440',
+    'benchmark': 'C5G7 7-group, 1M particles/batch, 150 batches',
+}
+
+
 def get_apple_tdp(gpu_name: str) -> float:
     """Get TDP for an Apple GPU name. Defaults to 40W (M4 Max)."""
     name_lower = gpu_name.lower()

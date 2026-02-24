@@ -248,6 +248,56 @@ def xsbench_throughput_chart(results: dict, output_path: str) -> str:
     return output_path
 
 
+def mcdc_throughput_chart(results: dict, output_path: str) -> str:
+    """Bar chart: absolute throughput comparison with MC/DC (Morgan et al. 2025).
+
+    Compares histories/sec for This Work (Apple M4 Max) vs MC/DC on V100 GPUs
+    using the same C5G7 7-group benchmark and similar conditions.
+    """
+    # Get This Work throughput — prefer mcdc_comparison (1M particle run)
+    this_work_pps = 0
+    if 'mcdc_comparison' in results:
+        this_work_pps = results['mcdc_comparison'].get('this_work', {}).get('throughput_hist_per_sec', 0)
+    if this_work_pps == 0 and 'c5g7_assembly' in results:
+        this_work_pps = results['c5g7_assembly'].get('particles_per_sec', 0)
+    if this_work_pps == 0 and 'c5g7' in results:
+        this_work_pps = results['c5g7'].get('particles_per_sec', 0)
+
+    labels = ["This Work\nApple M4 Max", "MC/DC\n1x V100", "MC/DC\n4x V100"]
+    values = [this_work_pps, 109_000, 437_000]
+    bar_colors = [COLORS[0], COLORS[2], COLORS[2]]
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    bars = ax.bar(range(len(labels)), values, color=bar_colors,
+                  edgecolor='black', linewidth=0.5)
+
+    # Bold red edge for This Work
+    bars[0].set_edgecolor('red')
+    bars[0].set_linewidth(2.0)
+
+    ax.set_ylabel('Histories per second', fontsize=12)
+    ax.set_title('Absolute Throughput: This Work vs MC/DC', fontsize=14, fontweight='bold')
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, fontsize=10, ha='center')
+
+    for bar, val in zip(bars, values):
+        label = f"{val/1000:.0f} K/sec"
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(values) * 0.01,
+                label, ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+    ax.set_ylim(bottom=0, top=max(values) * 1.2)
+    ax.grid(axis='y', alpha=0.3)
+
+    fig.text(0.5, 0.01,
+             "MC/DC: Morgan et al. 2025, C5G7 7-group benchmark",
+             ha='center', fontsize=8, color='gray', style='italic')
+
+    plt.tight_layout(rect=[0, 0.04, 1, 1])
+    plt.savefig(output_path, dpi=FIGURE_DPI, bbox_inches='tight')
+    plt.close()
+    return output_path
+
+
 def _empty_chart(output_path: str, message: str) -> str:
     """Generate a placeholder chart with a message."""
     fig, ax = plt.subplots(figsize=(8, 5))
