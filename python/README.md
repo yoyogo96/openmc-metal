@@ -1,10 +1,10 @@
 # OpenMC-Metal: Monte Carlo Neutron Transport on Apple Metal GPU
 
-A GPU-accelerated Monte Carlo neutron transport code targeting Apple Silicon using Metal Shading Language. OpenMC-Metal implements both event-based and history-based persistent kernel transport architectures for k-eigenvalue criticality calculations using C5G7 7-group cross sections, achieving **1.76M histories/sec with the persistent kernel**.
+A GPU-accelerated Monte Carlo neutron transport code targeting Apple Silicon using Metal Shading Language. OpenMC-Metal implements both event-based and history-based persistent kernel transport architectures for k-eigenvalue criticality calculations using C5G7 7-group cross sections, achieving up to **3.37M histories/sec** (pincell, 100M particles) and **1.87M histories/sec** (assembly, 5M particles) with the persistent kernel.
 
 ## Overview
 
-OpenMC-Metal brings Monte Carlo neutron transport to Apple Silicon GPUs via the Metal compute pipeline. The implementation supports two GPU transport architectures: an event-based algorithm with **three fused GPU compute kernels** per transport step, and a **history-based persistent kernel** that dispatches a single long-running shader processing complete neutron histories end-to-end. The persistent kernel achieves **1.76M histories/sec** on the M4 Max assembly benchmark, a 15.7x improvement over the event-based design. Cross-section data follows the C5G7 7-group benchmark specification covering seven representative reactor materials.
+OpenMC-Metal brings Monte Carlo neutron transport to Apple Silicon GPUs via the Metal compute pipeline. The implementation supports two GPU transport architectures: an event-based algorithm with **three fused GPU compute kernels** per transport step, and a **history-based persistent kernel** that dispatches a single long-running shader processing complete neutron histories end-to-end. The persistent kernel achieves **1.87M histories/sec** on the M4 Max assembly benchmark (15.9x over event-based), scaling to **3.37M histories/sec** on the pincell at 100M particles. Cross-section data follows the C5G7 7-group benchmark specification covering seven representative reactor materials.
 
 The Python driver layer uses PyObjC to interface directly with the Metal API, avoiding the need for intermediate frameworks. Because Apple Silicon uses a unified memory architecture, neutron state buffers are shared between the CPU and GPU without explicit data transfers, which reduces latency and simplifies the host-device coordination logic.
 
@@ -49,24 +49,34 @@ Results on an Apple M4 Max (40 GPU cores) running C5G7 criticality benchmarks:
 
 | Metric | Pincell (1M) | Assembly (1M) |
 |--------|-------------|---------------|
-| k-eff | 1.3256 ± 0.0007 | 1.2762 ± 0.0003 |
-| Throughput | 200,059 hist/sec | 1,762,612 hist/sec |
-| vs Event-based | 4.3x | 15.7x |
+| k-eff | 1.3254 ± 0.0004 | 1.2766 ± 0.0001 |
+| Throughput | 291,000 hist/sec | 1,776,000 hist/sec |
+| vs Event-based | 6.3x | 15.9x |
+
+Throughput scales with particle count. The assembly saturates at ~5M particles (compute-bound); the pincell continues scaling:
+
+| Particles | Pincell | Assembly |
+|----------:|--------:|---------:|
+| 1M | 291K hist/s | 1,776K hist/s |
+| 5M | 1,086K hist/s | **1,865K hist/s** (peak) |
+| 10M | 1,706K hist/s | 1,844K hist/s |
+| 50M | 3,320K hist/s | — |
+| 100M | **3,373K hist/s** (peak) | — |
 
 ### MC/DC Comparison (Morgan et al. 2025)
 
-Direct comparison under similar conditions (C5G7 7-group, 1M particles/batch):
+Assembly comparison under similar conditions (C5G7 7-group, 1M particles/batch):
 
 | Platform | Throughput (hist/sec) | TDP (W) | Efficiency (hist/sec/W) |
 |----------|----------------------|---------|------------------------|
-| **Persistent kernel — M4 Max** | **1,762,612** | **40** | **44,065** |
-| Event-based — M4 Max | 111,772 | 40 | 2,794 |
+| Persistent kernel — M4 Max | 1,776,000 | 40 | 44,400 |
+| **Event-based — M4 Max** | **111,772** | **40** | **2,794** |
 | MC/DC — 1x V100 | 109,000 | 300 | 363 |
 | MC/DC — 4x V100 | 437,000 | 1,200 | 364 |
 
-The persistent kernel on the Apple M4 Max achieves **4.0x the throughput of 4x V100** while consuming **30x less power**, for an energy efficiency advantage of **121x** over the multi-GPU MC/DC configuration.
+> **Important**: The fairest comparison is event-based vs event-based (same algorithm class): our M4 Max matches a single V100 in throughput (1.03x) with **7.7x better energy efficiency**. The persistent kernel's 16.3x advantage over the V100 is primarily algorithmic (history-based vs event-based), not hardware-driven — a persistent kernel on the V100 would likely yield comparable speedups.
 
-> **Note on CPU vs GPU performance**: The persistent kernel assembly benchmark (1,762,612 hist/sec) is **7.6x faster** than the Numba single-thread CPU baseline (231,819 particles/sec). The event-based pincell benchmark (46,198 particles/sec) remains slower than the Numba baseline due to branch divergence at small scale, but the persistent kernel eliminates this bottleneck by processing complete histories without inter-kernel synchronization.
+> **Note on CPU vs GPU performance**: The persistent kernel assembly benchmark (1,776,000 hist/sec) is **7.7x faster** than the Numba single-thread CPU baseline (231,819 particles/sec). A multi-core Numba baseline (~2M hist/sec estimated with 12 cores) would be comparable to the assembly GPU result. The GPU advantage is clearest on the pincell at high particle counts (3.37M hist/sec = 14.5x Numba single-thread).
 
 ## Architecture
 

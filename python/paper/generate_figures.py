@@ -51,10 +51,10 @@ C_WATER      = '#66c2a5'   # teal
 C_GUIDE      = '#8da0cb'   # light blue
 C_FISSION    = '#fc8d62'   # orange
 
-# Persistent kernel fallback constants
-PERSISTENT_THROUGHPUT_HIST_PER_SEC = 1_762_000
+# Persistent kernel fallback constants (assembly, 1M particles)
+PERSISTENT_THROUGHPUT_HIST_PER_SEC = 1_776_000
 PERSISTENT_TDP_WATTS = 40
-PERSISTENT_EFFICIENCY_HIST_PER_SEC_PER_WATT = 44_065
+PERSISTENT_EFFICIENCY_HIST_PER_SEC_PER_WATT = 44_400
 
 
 def load_results():
@@ -298,7 +298,7 @@ def fig_architecture_comparison(output_dir):
     """Figure: Event-based vs persistent kernel throughput for pincell and assembly."""
     groups = ['Pincell', 'Assembly']
     event_values   = [46_198,   111_772]
-    persist_values = [200_000, 1_762_000]
+    persist_values = [291_000, 1_776_000]
 
     x = np.arange(len(groups))
     width = 0.35

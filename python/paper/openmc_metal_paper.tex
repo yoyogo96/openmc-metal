@@ -47,22 +47,23 @@ GPU transport architectures.
 An event-based design with three fused kernels per transport step
 achieves \num{112000}~histories/sec for the C5G7 seven-group
 17$\times$17 assembly benchmark, matching a single NVIDIA V100 running
-MC/DC (\num{109000}~histories/sec).
+MC/DC (\num{109000}~histories/sec)---a hardware-only comparison using
+the same algorithm class.
 A history-based persistent kernel---where each GPU thread runs an
 entire particle lifetime in a single dispatch---achieves
-\num{1762000}~histories/sec on the same hardware, a $15.7\times$
-speedup over the event-based design and $16.2\times$ faster than
-the V100.
-The persistent kernel eliminates ${\sim}600$ kernel dispatches per
-batch, uses Structure-of-Arrays (SoA) memory layout for coalesced
-GPU access, and pre-allocates all GPU buffers for zero-allocation
-batch loops.
+\num{1776000}~histories/sec on the same hardware, a $15.9\times$
+speedup over the event-based design.  This improvement is primarily
+algorithmic (eliminating ${\sim}600$ kernel dispatches per batch) and
+would likely transfer to other GPU platforms.
+Throughput scales to \num{3370000}~histories/sec at
+\num{100000000}~particles for the pincell geometry.
 At \SI{40}{\watt} thermal design power versus \SI{300}{\watt} for
-the V100, the persistent kernel delivers
-\num{44065}~histories/sec/W---$121\times$ higher energy efficiency
-than the V100 (\num{363}~histories/sec/W).
-The pincell eigenvalue converges to $k_\mathrm{eff} = 1.3256 \pm
-0.0007$ (reference: 1.3301, $\Delta = -444$~pcm), validating
+the V100, the event-based architecture delivers $7.7\times$ better
+energy efficiency (\num{2794} vs.\ \num{363}~histories/sec/W),
+reflecting Apple Silicon's unified memory and SoC integration
+advantages.
+The pincell eigenvalue converges to $k_\mathrm{eff} = 1.3254 \pm
+0.0004$ (reference: 1.3301, $\Delta = -470$~pcm), validating
 transport physics across both architectures.
 The implementation uses Python with PyObjC Metal bindings, requiring
 no CUDA toolchain and running on consumer hardware.
@@ -125,12 +126,13 @@ contributions are:
         platform;
   \item A history-based persistent kernel where each GPU thread runs an
         entire particle lifetime in a single dispatch, achieving
-        $15.7\times$ speedup over the event-based design;
+        $15.9\times$ speedup over the event-based design---an
+        algorithmic improvement transferable to other GPU platforms;
   \item Validation against the C5G7 seven-group benchmark for both
         pincell and 17$\times$17 assembly geometries;
-  \item Performance comparison with MC/DC on NVIDIA V100, demonstrating
-        $16.2\times$ higher throughput and $121\times$ better energy
-        efficiency with the persistent kernel;
+  \item Hardware-only performance comparison with MC/DC on NVIDIA V100
+        using event-based transport ($1.03\times$ throughput,
+        $7.7\times$ energy efficiency);
   \item A Python/PyObjC implementation requiring no proprietary GPU
         toolchain, lowering the barrier to entry for GPU-accelerated
         transport research.
@@ -458,7 +460,9 @@ the same atomic float CAS loop as the event-based code
 The persistent kernel trades SIMD uniformity for dispatch efficiency:
 thread divergence increases because particles at different transport
 stages execute different code paths, but the elimination of
-${\sim}600$ kernel dispatches per batch more than compensates.
+${\sim}600$ kernel dispatches per batch more than compensates.  This
+algorithmic advantage is not specific to Metal or Apple Silicon and
+would apply equally to CUDA or ROCm implementations.
 
 % -----------------------------------------------------------------------------
 \subsection{Geometry}
@@ -629,49 +633,56 @@ geometries~\cite{hamilton2018multigroup}.
 
 \paragraph{Persistent kernel performance.}
 The history-based persistent kernel dramatically improves throughput.
-The pincell achieves \num{200000}~histories/sec at
-\num{1000000}~particles/batch ($4.3\times$ vs.\ event-based), and
-the assembly achieves \num{1762000}~histories/sec ($15.7\times$
+At \num{1000000}~particles/batch, the pincell achieves
+\num{291000}~histories/sec ($6.3\times$ vs.\ event-based) and the
+assembly achieves \num{1776000}~histories/sec ($15.9\times$
 vs.\ event-based).  Table~\ref{tab:scaling} shows throughput scaling
-with particle count for the persistent kernel pincell, demonstrating
-that throughput increases with GPU occupancy---the GPU is not fully
-saturated below \num{500000}~particles.
+with particle count for both geometries, revealing markedly different
+saturation behavior: the assembly plateaus near
+\num{1870000}~histories/sec at \num{5000000}~particles (compute-bound
+due to 578-cell geometry intersection), while the pincell continues
+scaling to \num{3370000}~histories/sec at \num{100000000}~particles
+(memory-bandwidth-bound with only 2~cells).
 
 \begin{table}[t]
 \centering
 \caption{Performance results on Apple M4~Max (event-based vs.\
-  persistent kernel).}
+  persistent kernel, 1M particles/batch).}
 \label{tab:performance}
 \small
 \begin{tabular}{@{}lrr@{}}
 \toprule
 Metric & Event-based & Persistent \\
 \midrule
-Pincell (hist/sec)  & \num{46198}  & \num{200000} \\
-Assembly (hist/sec) & \num{111772} & \num{1762000} \\
-Speedup (assembly)  & $1.0\times$  & $15.7\times$ \\
+Pincell (hist/sec)  & \num{46198}  & \num{291000} \\
+Assembly (hist/sec) & \num{111772} & \num{1776000} \\
+Speedup (assembly)  & $1.0\times$  & $15.9\times$ \\
 \midrule
 CPU baseline (Python)  & \multicolumn{2}{c}{\num{3907} hist/sec} \\
 CPU baseline (Numba JIT) & \multicolumn{2}{c}{\num{231819} hist/sec} \\
-GPU/Numba (assembly)   & $0.48\times$ & $7.6\times$ \\
+GPU/Numba (assembly)   & $0.48\times$ & $7.7\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{table}[t]
 \centering
-\caption{Persistent kernel throughput scaling with particle count
-  (pincell geometry, 10~batches).}
+\caption{Persistent kernel throughput scaling with particle count.
+  The assembly saturates at ${\sim}$5M particles (compute-bound);
+  the pincell continues scaling to ${\sim}$50M (memory-bandwidth-bound).}
 \label{tab:scaling}
 \small
-\begin{tabular}{@{}rr@{}}
+\begin{tabular}{@{}rrr@{}}
 \toprule
-Particles/batch & Throughput (hist/sec) \\
+Particles/batch & Pincell (hist/sec) & Assembly (hist/sec) \\
 \midrule
-\num{10000}    & \num{78000} \\
-\num{100000}   & \num{72000} \\
-\num{500000}   & \num{125000} \\
-\num{1000000}  & \num{200000} \\
+\num{1000000}   & \num{291000}   & \num{1776000} \\
+\num{2000000}   & \num{516000}   & \num{1823000} \\
+\num{5000000}   & \num{1086000}  & \textbf{\num{1865000}} \\
+\num{10000000}  & \num{1706000}  & \num{1844000} \\
+\num{20000000}  & \num{2110000}  & \num{1743000} \\
+\num{50000000}  & \num{3320000}  & --- \\
+\num{100000000} & \textbf{\num{3373000}} & --- \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -694,8 +705,8 @@ from eliminating ${\sim}600$ kernel dispatches per batch.  Profiling
 shows that GPU compute accounts for 59\% of per-batch time at
 \num{1000000}~particles (assembly), with buffer writes (2.6\%),
 fission bank reads (0.1\%), and source resampling (1.4\%) comprising
-the remainder.  The persistent kernel also exceeds the Numba-JIT
-single-thread baseline by $7.6\times$ for the assembly, confirming
+the remainder.  The persistent kernel exceeds the Numba-JIT
+single-thread baseline by $7.7\times$ for the assembly, confirming
 that the GPU advantage materializes when occupancy is sufficient.
 
 % -----------------------------------------------------------------------------
@@ -705,54 +716,65 @@ that the GPU advantage materializes when occupancy is sufficient.
 
 To contextualize the absolute performance, we compare against MC/DC
 (Morgan et al.~\cite{morgan2025mcdc}), which reports throughput for the
-C5G7 seven-group benchmark on NVIDIA V100 GPUs under similar conditions.
-Table~\ref{tab:mcdc} and Fig.~\ref{fig:mcdc} present the comparison
-for both architectures.
+C5G7 seven-group assembly benchmark on NVIDIA V100 GPUs.
+Table~\ref{tab:mcdc} and Fig.~\ref{fig:mcdc} present the comparison.
+All entries use the 17$\times$17 assembly geometry with
+\num{1000000}~particles/batch to ensure comparable conditions.
 
-The event-based architecture on the M4~Max achieves
-\num{111772}~histories/sec, comparable to a single V100 at
-\num{109000}~histories/sec ($1.03\times$).  The persistent kernel
-achieves \num{1762000}~histories/sec---$16.2\times$ faster than the
-V100 and $4.0\times$ faster than four V100 GPUs combined
-(\num{437000}~histories/sec).  We emphasize that this comparison
-involves different transport algorithms: our persistent kernel is
-history-based (single dispatch per batch), while MC/DC uses
-event-based GPU transport.  The comparison demonstrates both the
-hardware capabilities of Apple Silicon and the algorithmic advantage
-of the persistent kernel approach for multigroup problems.
+The \textbf{hardware-only comparison} (same algorithm class) is the
+event-based row: the M4~Max achieves \num{111772}~histories/sec,
+matching a single V100 at \num{109000}~histories/sec ($1.03\times$).
+This is the fairest measure of Apple Silicon vs.\ NVIDIA GPU hardware,
+since both codes use event-based transport.
+
+The persistent kernel achieves
+\num{1776000}~histories/sec---$16.3\times$ faster than the V100.
+However, this comparison conflates two effects: (1)~the hardware
+difference (M4~Max vs.\ V100) and (2)~the algorithmic difference
+(history-based persistent kernel vs.\ event-based transport).
+Since the persistent kernel is $15.9\times$ faster than our own
+event-based code on the same hardware, the bulk of the $16.3\times$
+advantage over the V100 is algorithmic, not hardware-driven.
+A persistent kernel implementation on the V100 would likely narrow
+this gap substantially.
 
 \begin{table}[t]
 \centering
-\caption{Throughput comparison with MC/DC~\cite{morgan2025mcdc} under
-  similar conditions (C5G7 7-group, 1M particles/batch).}
+\caption{Assembly throughput comparison with MC/DC~\cite{morgan2025mcdc}
+  (C5G7 7-group, 1M particles/batch).  The event-based row is the
+  fairest hardware comparison (same algorithm class); the persistent
+  row conflates algorithmic and hardware advantages.}
 \label{tab:mcdc}
 \small
 \begin{tabular}{@{}lcccc@{}}
 \toprule
 & \multicolumn{2}{c}{This Work (M4 Max)} & MC/DC & MC/DC \\
-& Event & Persistent & 1$\times$ V100 & 4$\times$ V100 \\
+& Event & Persistent$^\dagger$ & 1$\times$ V100 & 4$\times$ V100 \\
 \midrule
 Throughput (hist/s)
-  & \num{111772} & \textbf{\num{1762000}} & \num{109000} & \num{437000} \\
+  & \num{111772} & \num{1776000} & \num{109000} & \num{437000} \\
 Ratio vs.\ V100
-  & $1.03\times$ & $\mathbf{16.2\times}$ & $1.0\times$ & $4.0\times$ \\
+  & $1.03\times$ & $16.3\times^\dagger$ & $1.0\times$ & $4.0\times$ \\
 \midrule
 TDP (W)
   & 40 & 40 & 300 & 1200 \\
 Hist/sec/W
-  & \num{2794} & \textbf{\num{44065}} & \num{363} & \num{364} \\
+  & \num{2794} & \num{44400}$^\dagger$ & \num{363} & \num{364} \\
 Efficiency ratio
-  & $7.7\times$ & $\mathbf{121\times}$ & $1.0\times$ & $1.0\times$ \\
+  & $\mathbf{7.7\times}$ & $122\times^\dagger$ & $1.0\times$ & $1.0\times$ \\
 \bottomrule
+\multicolumn{5}{@{}l@{}}{\scriptsize $^\dagger$Different algorithm
+  (history-based vs.\ event-based); not a pure hardware comparison.}
 \end{tabular}
 \end{table}
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{figures/fig_mcdc_comparison.png}
-  \caption{Absolute throughput comparison: This Work (Apple M4~Max) vs.\
-    MC/DC~\cite{morgan2025mcdc} on NVIDIA V100 GPUs.  The persistent
-    kernel on the M4~Max exceeds a single V100 by $16.2\times$.}
+  \caption{Assembly throughput comparison: This Work (Apple M4~Max) vs.\
+    MC/DC~\cite{morgan2025mcdc} on NVIDIA V100 GPUs.  The event-based
+    comparison ($1.03\times$) is hardware-only; the persistent kernel
+    advantage ($16.3\times$) is primarily algorithmic.}
   \label{fig:mcdc}
 \end{figure}
 
@@ -761,21 +783,27 @@ Efficiency ratio
 \label{sec:efficiency}
 % -----------------------------------------------------------------------------
 
-The most striking result is the energy efficiency advantage
-(Fig.~\ref{fig:efficiency}).  With the persistent kernel, the M4~Max
-at \SI{40}{\watt} TDP achieves \num{44065}~histories/sec/W, compared
-to \num{363}~histories/sec/W for the V100 at
-\SI{300}{\watt}---a $\mathbf{121\times}$ improvement in performance
-per watt.  Even the event-based architecture achieves $7.7\times$
-better efficiency.
+The energy efficiency comparison (Fig.~\ref{fig:efficiency}) must be
+interpreted carefully.  The fairest comparison uses the same algorithm
+class: our event-based architecture achieves
+\num{2794}~histories/sec/W versus \num{363}~histories/sec/W for the
+V100---a $\mathbf{7.7\times}$ improvement attributable to hardware
+and memory architecture differences alone.
+
+The persistent kernel delivers \num{44400}~histories/sec/W, nominally
+$122\times$ better than the V100.  However, this factor combines
+algorithmic improvement ($15.9\times$ from persistent vs.\ event-based)
+with hardware efficiency ($7.7\times$), and the V100 figure uses
+event-based transport.  A persistent kernel on the V100 would likely
+close much of this gap.
 
 \begin{figure}[t]
   \centering
   \includegraphics[width=\columnwidth]{figures/fig_energy_efficiency.png}
-  \caption{Energy efficiency comparison (histories/sec/W).  The Apple
-    M4~Max persistent kernel achieves $121\times$ higher efficiency
-    than the NVIDIA V100, reflecting both the algorithmic advantage of
-    history-based transport and Apple Silicon's low power envelope.}
+  \caption{Energy efficiency comparison (histories/sec/W).  The
+    hardware-only comparison (event-based, same algorithm class) shows
+    $7.7\times$ better efficiency for the M4~Max.  The persistent
+    kernel's $122\times$ figure conflates algorithmic and hardware gains.}
   \label{fig:efficiency}
 \end{figure}
 
@@ -795,11 +823,11 @@ This efficiency advantage arises from three factors:
 
 We note that TDP-based energy efficiency comparisons have inherent
 limitations: actual power draw varies with workload, and the TDP
-accounting differs between SoC and discrete GPU architectures.  The
-$121\times$ factor combines both the algorithmic improvement (persistent
-vs.\ event-based) and the hardware efficiency advantage; a fair
-hardware-only comparison using the event-based algorithm yields
-$7.7\times$, which is still substantial.
+accounting differs between SoC and discrete GPU architectures.
+The $7.7\times$ hardware-only efficiency advantage is the most
+defensible claim; the $122\times$ persistent-kernel figure should
+be cited only with the caveat that it includes a $15.9\times$
+algorithmic contribution.
 
 % =============================================================================
 \section{Discussion}
@@ -865,13 +893,16 @@ The current implementation has several limitations:
 \end{enumerate}
 
 \paragraph{Event-based vs.\ persistent kernel.}
-The $15.7\times$ speedup of the persistent kernel over the event-based
+The $15.9\times$ speedup of the persistent kernel over the event-based
 design is the central finding of this work.  The event-based architecture,
 while theoretically superior for SIMD uniformity~\cite{hamilton2018multigroup},
 is dominated by kernel dispatch overhead on Metal: 3~kernels $\times$
 ${\sim}200$ steps = ${\sim}600$ dispatches per batch, each requiring
 Python/PyObjC command buffer allocation.  The persistent kernel replaces
-these with a single dispatch.  The trade-off is increased thread
+these with a single dispatch.  This algorithmic advantage is not
+specific to Apple Silicon---a persistent kernel on NVIDIA or AMD GPUs
+would likely yield comparable speedups over event-based transport for
+multigroup problems.  The trade-off is increased thread
 divergence---particles at different transport stages within a single
 kernel---but this cost is modest for multi-group transport where the
 physics per collision is uniform.  For continuous-energy transport with
@@ -883,9 +914,13 @@ The Numba-JIT single-thread baseline (\num{231819}~hist/sec) exceeds
 the event-based GPU pincell result by $5\times$, consistent with
 Hamilton and Evans~\cite{hamilton2018multigroup} who showed GPU advantage
 emerges only at sufficient scale.  However, the persistent kernel
-assembly at \num{1762000}~hist/sec is $7.6\times$ faster than the
-Numba single thread, confirming that with the right algorithm, the GPU
-provides a definitive advantage even against compiled baselines.
+assembly at \num{1776000}~hist/sec is $7.7\times$ faster than the
+Numba single thread, and the pincell at \num{100000000}~particles
+reaches \num{3370000}~hist/sec ($14.5\times$ faster).  With 12~CPU
+cores on the M4~Max, a multi-threaded Numba baseline might reach
+${\sim}\num{2000000}$~hist/sec---comparable to the persistent kernel
+assembly but below the pincell peak.  A multi-core CPU comparison
+remains future work.
 
 \paragraph{Future work.}
 Natural extensions include:
@@ -909,22 +944,29 @@ on Apple Silicon using the Metal GPU compute framework, comparing
 event-based and history-based persistent kernel architectures.
 
 The event-based architecture with three fused kernels achieves
-\num{111772}~histories/sec, matching a single NVIDIA V100.  The
-history-based persistent kernel---where each GPU thread runs an entire
-particle lifetime in one dispatch---achieves
-\num{1762000}~histories/sec, a $15.7\times$ improvement and
-$16.2\times$ faster than the V100.
+\num{111772}~histories/sec on the 17$\times$17 assembly benchmark,
+matching a single NVIDIA V100 running MC/DC ($1.03\times$).  This
+hardware-only comparison (same algorithm class) establishes that
+Apple Silicon is competitive with data-center GPUs for MC transport.
 
-The key finding is the combined algorithmic and architectural efficiency
-advantage: at \SI{40}{\watt}, the persistent kernel delivers
-\num{44065}~histories/sec/W versus \num{363}~histories/sec/W for the
-V100---a $121\times$ improvement.  Even the hardware-only comparison
-(event-based, same algorithm class) yields $7.7\times$ better
-efficiency.  These results demonstrate that Apple Silicon is not merely
-viable but potentially superior for Monte Carlo transport workloads,
-particularly in power-constrained environments such as deployed reactor
-monitoring, portable criticality safety calculations, or large-scale
-parameter studies where electricity cost dominates.
+The history-based persistent kernel---where each GPU thread runs an
+entire particle lifetime in one dispatch---achieves
+\num{1776000}~histories/sec on the same hardware, a $15.9\times$
+improvement.  Throughput continues to scale with particle count:
+up to \num{3370000}~histories/sec at \num{100000000}~particles for
+the pincell geometry.  The persistent kernel's advantage over the
+event-based design is primarily algorithmic (eliminating ${\sim}600$
+kernel dispatches per batch), not hardware-specific, and a persistent
+kernel implementation on NVIDIA GPUs would likely yield comparable
+speedups.
+
+At \SI{40}{\watt} TDP, the event-based architecture delivers
+$7.7\times$ better energy efficiency than the V100 at
+\SI{300}{\watt}---a hardware advantage from unified memory and SoC
+integration.  This makes Apple Silicon attractive for
+power-constrained environments such as deployed reactor monitoring,
+portable criticality safety calculations, or large-scale parameter
+studies where electricity cost dominates.
 
 The Python/PyObjC implementation demonstrates that Metal is accessible
 for scientific computing without requiring the CUDA toolchain.  The
