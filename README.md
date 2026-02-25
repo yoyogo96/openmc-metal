@@ -1,10 +1,10 @@
 # OpenMC-Metal: Monte Carlo Neutron Transport on Apple Metal GPU
 
-A GPU-accelerated Monte Carlo neutron transport code targeting Apple Silicon using Metal Shading Language. OpenMC-Metal implements an event-based transport algorithm with fused GPU kernels for k-eigenvalue criticality calculations using C5G7 7-group cross sections.
+A GPU-accelerated Monte Carlo neutron transport code targeting Apple Silicon using Metal Shading Language. OpenMC-Metal implements both event-based and history-based persistent kernel transport architectures for k-eigenvalue criticality calculations using C5G7 7-group cross sections, achieving up to **3.37M histories/sec** (pincell, 100M particles) and **1.87M histories/sec** (assembly, 5M particles) with the persistent kernel.
 
 ## Overview
 
-OpenMC-Metal brings Monte Carlo neutron transport to Apple Silicon GPUs via the Metal compute pipeline. The implementation uses an event-based algorithm with **three fused GPU compute kernels** per transport step, optimized for Metal's unified memory architecture. Cross-section data follows the C5G7 7-group benchmark specification covering seven representative reactor materials.
+OpenMC-Metal brings Monte Carlo neutron transport to Apple Silicon GPUs via the Metal compute pipeline. The implementation supports two GPU transport architectures: an event-based algorithm with **three fused GPU compute kernels** per transport step, and a **history-based persistent kernel** that runs complete neutron histories in a single GPU dispatch. The persistent kernel achieves **1.87M histories/sec** on the M4 Max assembly benchmark (15.9x over event-based), scaling to **3.37M histories/sec** on the pincell at 100M particles. Cross-section data follows the C5G7 7-group benchmark specification covering seven representative reactor materials.
 
 The Python driver layer uses PyObjC to interface directly with the Metal API, avoiding the need for intermediate frameworks. Because Apple Silicon uses a unified memory architecture, neutron state buffers are shared between the CPU and GPU without explicit data transfers, which reduces latency and simplifies the host-device coordination logic.
 
@@ -12,6 +12,7 @@ The Python driver layer uses PyObjC to interface directly with the Metal API, av
 
 - **GPU-accelerated multi-group Monte Carlo transport** using Metal compute shaders on Apple Silicon
 - **3 fused compute kernels** (down from 5) with kernel fusion for XS lookup + distance sampling and collision + tally scoring
+- **History-based persistent kernel** with single-dispatch transport, SoA memory layout, and zero-allocation batch loops
 - **K-eigenvalue power iteration** with Shannon entropy convergence monitoring
 - **C5G7 7-group benchmark cross sections** covering 7 materials (UO2, MOX 4.3%, MOX 7.0%, MOX 8.7%, fission chamber, guide tube, moderator)
 - **Philox-2x32-10 counter-based RNG** with per-particle independent streams
@@ -44,19 +45,38 @@ Results on an Apple M4 Max (40 GPU cores) running C5G7 criticality benchmarks:
 | k-eff | 1.2751 +/- 0.0001 |
 | Throughput | 111,772 histories/sec |
 
+### Persistent Kernel Results
+
+| Metric | Pincell (1M) | Assembly (1M) |
+|--------|-------------|---------------|
+| k-eff | 1.3254 ± 0.0004 | 1.2766 ± 0.0001 |
+| Throughput | 291,000 hist/sec | 1,776,000 hist/sec |
+| vs Event-based | 6.3x | 15.9x |
+
+Throughput scales with particle count. The assembly saturates at ~5M particles (compute-bound); the pincell continues scaling:
+
+| Particles | Pincell | Assembly |
+|----------:|--------:|---------:|
+| 1M | 291K hist/s | 1,776K hist/s |
+| 5M | 1,086K hist/s | **1,865K hist/s** (peak) |
+| 10M | 1,706K hist/s | 1,844K hist/s |
+| 50M | 3,320K hist/s | — |
+| 100M | **3,373K hist/s** (peak) | — |
+
 ### MC/DC Comparison (Morgan et al. 2025)
 
-Direct comparison under similar conditions (C5G7 7-group, 1M particles/batch):
+Assembly comparison under similar conditions (C5G7 7-group, 1M particles/batch):
 
 | Platform | Throughput (hist/sec) | TDP (W) | Efficiency (hist/sec/W) |
 |----------|----------------------|---------|------------------------|
-| **This Work — M4 Max** | **111,772** | **40** | **2,794** |
+| Persistent kernel — M4 Max | 1,776,000 | 40 | 44,400 |
+| **Event-based — M4 Max** | **111,772** | **40** | **2,794** |
 | MC/DC — 1x V100 | 109,000 | 300 | 363 |
 | MC/DC — 4x V100 | 437,000 | 1,200 | 364 |
 
-The Apple M4 Max matches a single NVIDIA V100 in absolute throughput (1.03x) while achieving **7.7x better energy efficiency** (2,794 vs 363 hist/sec/W).
+> **Important**: The fairest comparison is event-based vs event-based (same algorithm class): our M4 Max matches a single V100 in throughput (1.03x) with **7.7x better energy efficiency**. The persistent kernel's 16.3x advantage over the V100 is primarily algorithmic (history-based vs event-based), not hardware-driven — a persistent kernel on the V100 would likely yield comparable speedups.
 
-> **Note on CPU vs GPU performance**: A single Numba-JIT compiled CPU thread on the M4 Max (231,819 particles/sec) outperforms the Metal GPU pincell benchmark (46,198 particles/sec) by ~5x, due to branch divergence inherent in Monte Carlo transport. The GPU becomes competitive at scale (1M particles on the 17x17 assembly: 111,772 hist/sec) and offers significant energy efficiency advantages over discrete GPUs.
+> **Note on CPU vs GPU performance**: The persistent kernel assembly (1,776,000 hist/sec) is **7.7x faster** than the Numba single-thread CPU baseline (231,819 particles/sec). A multi-core Numba baseline (~2M hist/sec estimated with 12 cores) would be comparable to the assembly GPU result. The GPU advantage is clearest on the pincell at high particle counts (3.37M hist/sec = 14.5x Numba single-thread).
 
 ## Architecture
 
@@ -69,6 +89,16 @@ The transport cycle uses three fused Metal compute kernels per step, reduced fro
 2. **`move_particle`** — Advances each particle along its direction vector to the nearer of the sampled collision site or the next geometry boundary. Particles crossing boundaries trigger a material update via lattice-accelerated cell finding. This kernel remains standalone due to complex geometry divergence.
 
 3. **`collision_and_tally`** (fused) — Applies collision physics (scatter, fission, or capture) and immediately scores track-length flux and fission rate tallies using atomic float CAS loops. Fission events deposit sites into the fission bank for the next generation.
+
+### History-Based Persistent Kernel
+
+The persistent kernel dispatches a single long-running Metal compute shader that processes complete neutron histories end-to-end. Each GPU thread owns one particle from birth to absorption, iterating through geometry crossings, collisions, and tally scoring entirely within the shader. This eliminates the ~600 kernel dispatches per batch that limit the event-based design.
+
+Key design choices enabling the 15.9x speedup on assembly:
+
+- **Single-dispatch transport**: one `dispatchThreadgroups` call covers an entire batch
+- **Structure-of-Arrays (SoA) memory layout**: separate arrays for position, direction, energy group, and weight improve GPU memory coalescing
+- **Zero-allocation batch loops**: fission sites written directly into a pre-allocated bank with atomic index increments
 
 ### Unified Memory Advantage
 
@@ -86,6 +116,10 @@ src/openmc_metal/
   transport.py       - Transport kernel dispatch and buffer management
   tally.py           - Tally scoring and statistical reduction
   shaders.py         - Metal shader library loader and kernel cache
+  persistent/
+    shader.py        - Metal persistent transport shader (695 lines MSL)
+    engine.py        - PyObjC GPU engine for persistent kernel
+    simulation.py    - History-based simulation driver
   benchmarks/
     runner.py        - Benchmark CLI entry point
     xsbench.py       - XSBench cross-section lookup microbenchmark
